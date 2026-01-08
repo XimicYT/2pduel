@@ -4,7 +4,7 @@ const http = require('http');
 const server = http.createServer(app);
 const { Server } = require("socket.io");
 
-// Enable CORS for development/production
+// Enable CORS
 const io = new Server(server, {
     cors: {
         origin: "*", 
@@ -34,37 +34,37 @@ io.on('connection', (socket) => {
         if (room && room.players[oldSocketID]) {
             console.log(`[RECONNECT] SUCCESS! Restoring state.`);
             
-            // 1. Stop the Bleeding
+            // A. Stop the Bleeding
             if (disconnectTimers[oldSocketID]) {
                 clearInterval(disconnectTimers[oldSocketID]);
                 delete disconnectTimers[oldSocketID];
                 console.log(`[TIMER] Bleed timer cancelled for ${oldSocketID}`);
             }
 
-            // 2. Swap Data to New Socket
+            // B. Swap Data to New Socket
             room.players[socket.id] = room.players[oldSocketID];
             room.players[socket.id].id = socket.id; // Update internal ID
             delete room.players[oldSocketID];       // Remove old key
 
-            // 3. Re-join Socket.io Room
+            // C. Re-join Socket.io Room
             socket.join(roomID);
             
-            // 4. Notify Client (You are back!)
+            // D. Restore State to Returning Player
             socket.emit('reconnectSuccess', { 
                 roomID, 
                 players: room.players,
                 me: room.players[socket.id] 
             });
 
-            // 5. Notify Opponent (They are back!)
+            // E. Sync Both Players & Start Countdown
             io.to(roomID).emit('playerReconnected', { 
                 id: socket.id, 
-                oldId: oldSocketID 
+                oldId: oldSocketID,
+                resumeIn: 3 // Seconds to wait
             });
 
         } else {
             console.log(`[RECONNECT] FAILED. Room or player not found.`);
-            // Tell client to give up and go to menu
             socket.emit('reconnectFailed');
         }
     });
@@ -73,7 +73,7 @@ io.on('connection', (socket) => {
     // 2. MATCHMAKING
     // ==========================================
     socket.on('joinQueue', (playerData) => {
-        // Remove from queue if already there (prevent duplicates)
+        // Remove from queue if already there
         queue = queue.filter(p => p.id !== socket.id);
         
         console.log(`[QUEUE] User ${playerData.username} joined.`);
@@ -93,8 +93,9 @@ io.on('connection', (socket) => {
                         id: p1.id, 
                         username: p1.data.username,
                         classType: p1.data.classType,
-                        hp: 100, maxHp: 100, // Default, we will customize later
+                        hp: 100, maxHp: 100, 
                         x: 100, y: 300, 
+                        angle: 0,
                         ...p1.data 
                     },
                     [p2.id]: { 
@@ -103,6 +104,7 @@ io.on('connection', (socket) => {
                         classType: p2.data.classType,
                         hp: 100, maxHp: 100,
                         x: 1800, y: 300, 
+                        angle: Math.PI, // Facing left
                         ...p2.data 
                     }
                 }
@@ -141,7 +143,7 @@ io.on('connection', (socket) => {
     socket.on('disconnect', () => {
         console.log(`[DISCONNECT] Socket: ${socket.id}`);
         
-        // 1. Find the Room they were in
+        // Find the Room they were in
         let targetRoomId = null;
         for (const rId in rooms) {
             if (rooms[rId].players[socket.id]) {
@@ -150,7 +152,6 @@ io.on('connection', (socket) => {
             }
         }
 
-        // 2. If they were in a game...
         if (targetRoomId) {
             const room = rooms[targetRoomId];
             console.log(`[GAME] Player left active match in ${targetRoomId}`);
@@ -158,14 +159,12 @@ io.on('connection', (socket) => {
             // Notify opponent immediately
             io.to(targetRoomId).emit('opponentDisconnected', { id: socket.id });
 
-            // 3. START BLEED OUT TIMER
+            // START BLEED OUT TIMER
             const playerState = room.players[socket.id];
-            
-            // Damage per tick (5% of max HP)
-            const damagePerTick = Math.ceil((playerState.maxHp || 100) * 0.05);
+            const damagePerTick = Math.ceil((playerState.maxHp || 100) * 0.05); // 5% per second
 
             disconnectTimers[socket.id] = setInterval(() => {
-                // Ensure room/player still exists before applying damage
+                // Safety check: ensure room still exists
                 if (!rooms[targetRoomId] || !rooms[targetRoomId].players[socket.id]) {
                     clearInterval(disconnectTimers[socket.id]);
                     return;
