@@ -415,7 +415,7 @@ function broadcastRoomState(room) {
     const p1 = room.players[playerIds[0]];
     const p2 = room.players[playerIds[1]];
     
-    // We send 'vx/vy' so clients know if physics is controlling the player
+    // SEND OPPONENT DATA (What you were already doing)
     io.to(playerIds[1]).emit('opponentUpdate', { 
         x: p1.x, y: p1.y, vx: p1.vx, vy: p1.vy, angle: p1.angle, 
         invisible: p1.invisible, shield: p1.shield 
@@ -424,6 +424,11 @@ function broadcastRoomState(room) {
         x: p2.x, y: p2.y, vx: p2.vx, vy: p2.vy, angle: p2.angle, 
         invisible: p2.invisible, shield: p2.shield 
     });
+
+    // === NEW: SEND SELF CORRECTION DATA ===
+    // This tells the client "Here is where you actually are"
+    io.to(playerIds[0]).emit('selfUpdate', { x: p1.x, y: p1.y, vx: p1.vx, vy: p1.vy, hp: p1.hp });
+    io.to(playerIds[1]).emit('selfUpdate', { x: p2.x, y: p2.y, vx: p2.vx, vy: p2.vy, hp: p2.hp });
 }
 
 function updateRoom(room) {
