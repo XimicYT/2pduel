@@ -78,11 +78,14 @@ io.on('connection', (socket) => {
         const finalPlayerData = {
             username: cleanName,
             classType: playerData.classType || 'assault',
-            primary: playerData.primary || 'rifle',
-            secondary: playerData.secondary || 'pistol',
-            utility: playerData.utility || 'grenade'
+            // Default to 'rifle' if primary is missing/null
+            primary: playerData.primary || 'rifle',     
+            // Default to 'pistol' if secondary is missing/null
+            secondary: playerData.secondary || 'pistol', 
+            // Default to 'grenade' if utility is missing/null
+            utility: playerData.utility || 'grenade'     
         };
-
+        console.log(`Player ${cleanName} joined queue with:`, finalPlayerData);
         if (waitingPlayer) {
             // Create Match
             const roomID = `room_${Date.now()}`;
