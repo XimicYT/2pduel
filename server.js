@@ -22,7 +22,7 @@ const MAX_HP = 100;
 const BLEED_DAMAGE = 5; // Damage per second when disconnected
 const PLAYER_RADIUS = 30;
 
-// 3. WEAPON DATABASE (Server Authority)
+// 3. WEAPON DATABASE
 const WEAPONS = {
     // Primary
     'rifle':    { damage: 12, speed: 20, cooldown: 150,  range: 1000, color: '#ffff00' },
@@ -51,7 +51,6 @@ io.on('connection', (socket) => {
 
     // --- MATCHMAKING ---
     socket.on('joinQueue', (playerData) => {
-        // Sanitize Name
         const cleanName = (playerData.username || "Agent").substring(0, 12).replace(/[^a-zA-Z0-9 _-]/g, "");
         
         // Uniqueness Check
@@ -127,7 +126,7 @@ io.on('connection', (socket) => {
             player.y = data.y;
             player.angle = data.angle;
             
-            // Relay to opponent for interpolation
+            // Relay to opponent
             socket.to(data.roomID).emit('opponentUpdate', { 
                 id: socket.id, 
                 x: data.x, 
@@ -143,19 +142,15 @@ io.on('connection', (socket) => {
         if (!room || !room.players[socket.id]) return;
 
         const player = room.players[socket.id];
-        
-        // 1. Identify Weapon from Inventory
-        const weaponKey = player[data.slot]; // data.slot is 'primary', 'secondary', etc.
+        const weaponKey = player[data.slot]; 
         const stats = WEAPONS[weaponKey];
 
         if (!stats) return;
 
-        // 2. Cooldown Check
         const now = Date.now();
         if (now - player.lastShootTime < stats.cooldown) return;
         player.lastShootTime = now;
 
-        // 3. Create Bullet(s)
         const spawnDist = PLAYER_RADIUS + 10;
         const count = stats.count || 1;
         const spread = stats.spread || 0;
@@ -194,26 +189,42 @@ io.on('connection', (socket) => {
         }
     });
 
-    // --- RECONNECT ---
-    socket.on('reconnectRequest', (data) => {
-        const { roomID, oldSocketID } = data;
-        if (rooms[roomID] && rooms[roomID].players[oldSocketID]) {
-            if (disconnectTimers[oldSocketID]) {
-                clearInterval(disconnectTimers[oldSocketID]);
-                delete disconnectTimers[oldSocketID];
-            }
+    // --- RECONNECT (FIXED) ---
+    // --- RECONNECT (FIXED) ---
+socket.on('reconnectRequest', (data) => {
+    const { roomID, oldSocketID } = data;
 
-            const pData = rooms[roomID].players[oldSocketID];
-            delete rooms[roomID].players[oldSocketID];
-            rooms[roomID].players[socket.id] = pData;
-
-            socket.join(roomID);
-            socket.emit('reconnectSuccess', { roomID, me: pData, players: rooms[roomID].players });
-            socket.to(roomID).emit('playerReconnected', { oldId: oldSocketID, id: socket.id, resumeIn: 3 });
-        } else {
-            socket.emit('reconnectFailed');
+    if (rooms[roomID] && rooms[roomID].players[oldSocketID]) {
+        // 1. Stop the bleed timer immediately
+        if (disconnectTimers[oldSocketID]) {
+            clearInterval(disconnectTimers[oldSocketID]);
+            delete disconnectTimers[oldSocketID];
         }
-    });
+
+        const pData = rooms[roomID].players[oldSocketID];
+        
+        // Update the socket ID mapping
+        delete rooms[roomID].players[oldSocketID];
+        rooms[roomID].players[socket.id] = pData;
+
+        socket.join(roomID);
+        
+        // 2. Tell the player they are back (Load the game)
+        socket.emit('reconnectSuccess', { roomID, me: pData, players: rooms[roomID].players });
+        
+        // 3. Tell EVERYONE to reset state and start countdown
+        // We add a tiny delay to ensure the client has loaded the game screen first
+        setTimeout(() => {
+            io.to(roomID).emit('matchResumed', { 
+                reconnectedId: socket.id, 
+                resumeIn: 3 
+            });
+        }, 100); // 100ms buffer
+        
+    } else {
+        socket.emit('reconnectFailed');
+    }
+});
 
     // --- DISCONNECT ---
     socket.on('disconnect', () => {
@@ -289,7 +300,7 @@ function updateRoom(room) {
             if (playerId === b.ownerId) continue;
 
             const player = room.players[playerId];
-            if (getDistance(b, player) < PLAYER_RADIUS + 6) { // + Bullet Radius
+            if (getDistance(b, player) < PLAYER_RADIUS + 6) { 
                 player.hp -= b.damage;
                 bulletsToRemove.push(b.id);
                 stateChanged = true;
@@ -318,7 +329,6 @@ function updateRoom(room) {
 
 function endGame(roomId, reason, winnerId) {
     if (rooms[roomId]) {
-        // Stop timers
         Object.keys(rooms[roomId].players).forEach(pid => {
             if (disconnectTimers[pid]) {
                 clearInterval(disconnectTimers[pid]);
