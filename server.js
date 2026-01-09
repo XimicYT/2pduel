@@ -19,7 +19,9 @@ const PORT = process.env.PORT || 3000;
 // ==================================================================
 // 2. CONFIGURATION & CONSTANTS
 // ==================================================================
-const TICK_RATE = 1000 / 60; 
+const TICK_RATE = 1000 / 60; // 60 Physics calculations per second
+const BROADCAST_RATE = 2;    // Only send network updates every 2 ticks (30Hz)
+
 const MAP_WIDTH = 1920;
 const MAP_HEIGHT = 1080;
 const BASE_HP = 100;
@@ -150,6 +152,7 @@ io.on('connection', (socket) => {
 
             rooms[roomID] = {
                 id: roomID,
+                tickCount: 0, // Used for throttling updates
                 bullets: [],
                 players: {
                     [p1ID]: p1State,
@@ -189,15 +192,9 @@ io.on('connection', (socket) => {
 
             player.angle = data.angle;
             
-            // Sync movement + Status flags to opponent
-            socket.to(data.roomID).emit('opponentUpdate', { 
-                id: socket.id, 
-                x: player.x, 
-                y: player.y, 
-                angle: data.angle,
-                invisible: player.invisible,
-                shield: player.shield
-            });
+            // NOTE: We do NOT emit opponentUpdate here anymore. 
+            // We let the Game Loop handle it at a steady 30Hz rate.
+            // This prevents "Flood" lag.
         }
     });
 
@@ -268,12 +265,11 @@ io.on('connection', (socket) => {
                         const angle = Math.atan2(dy, dx);
                         
                         // SERVER SIDE REPULSE PHYSICS
-                        // Apply velocity directly to enemy state
                         const force = 30; // Strong push
                         enemy.vx += Math.cos(angle) * force;
                         enemy.vy += Math.sin(angle) * force;
 
-                        // Also emit forcePush for visual shake, but physics is now server-authoritative
+                        // Emit forcePush so opponent client knows they were hit
                         io.to(pid).emit('forcePush', { angle: angle, force: 15 }); 
                     }
                 });
@@ -371,7 +367,6 @@ io.on('connection', (socket) => {
             rooms[roomID].players[socket.id] = pData;
             pData.id = socket.id;
             
-            // Reset velocity on reconnect to prevent flying off
             pData.vx = 0;
             pData.vy = 0;
 
@@ -438,15 +433,18 @@ function updateRoom(room) {
     const now = Date.now();
     let stateChanged = false;
     
+    // Increment Tick Counter
+    room.tickCount = (room.tickCount || 0) + 1;
+    const shouldBroadcast = room.tickCount % BROADCAST_RATE === 0;
+
     // 1. PHYSICS UPDATE FOR PLAYERS
-    // This runs on the server, ensuring movement even if client is tabbed out
     const playerIds = Object.keys(room.players);
     let anyPlayerMoved = false;
 
     playerIds.forEach(pid => {
         const p = room.players[pid];
 
-        // Apply Velocity (from Repulse or Dash)
+        // Apply Velocity (Repulse/Dash)
         if (Math.abs(p.vx) > 0.1 || Math.abs(p.vy) > 0.1) {
             p.x += p.vx;
             p.y += p.vy;
@@ -468,27 +466,30 @@ function updateRoom(room) {
             anyPlayerMoved = true;
         }
 
-        // Regen Logic (2 HP/sec if no damage for 5s)
+        // Regen Logic
         if (p.hp < p.maxHp && p.hp > 0) {
             if (now - p.lastDamageTime > REGEN_DELAY) {
-                p.hp = Math.min(p.maxHp, p.hp + (REGEN_RATE / 60)); // Add per tick
+                p.hp = Math.min(p.maxHp, p.hp + (REGEN_RATE / 60)); 
             }
         }
     });
 
-    // If server moved players (Repulse/Dash), broadcast to everyone
-    // This ensures opponent sees the push even if the target is AFK/Tabbed out
-    if (anyPlayerMoved) {
+    // === NETWORK THROTTLING ===
+    // We only send updates every 2nd or 3rd tick to prevent packet bunching/teleporting.
+    // AND we send updates if the server moved the player (Repulse), overriding client lag.
+    if (shouldBroadcast) {
         if (playerIds.length === 2) {
             const p1 = room.players[playerIds[0]];
             const p2 = room.players[playerIds[1]];
             
+            // We include vx/vy so the client *could* predict if you wanted, 
+            // but mostly this steady 30Hz stream prevents the "Teleport" effect.
             io.to(playerIds[1]).emit('opponentUpdate', { 
-                x: p1.x, y: p1.y, angle: p1.angle, 
+                x: p1.x, y: p1.y, vx: p1.vx, vy: p1.vy, angle: p1.angle, 
                 invisible: p1.invisible, shield: p1.shield 
             });
             io.to(playerIds[0]).emit('opponentUpdate', { 
-                x: p2.x, y: p2.y, angle: p2.angle, 
+                x: p2.x, y: p2.y, vx: p2.vx, vy: p2.vy, angle: p2.angle, 
                 invisible: p2.invisible, shield: p2.shield 
             });
         }
@@ -509,12 +510,10 @@ function updateRoom(room) {
             b.traveled += 16; 
         }
 
-        // Check Boundaries / Lifetime
         if (b.traveled > b.range || b.x < 0 || b.x > MAP_WIDTH || b.y < 0 || b.y > MAP_HEIGHT) {
             bulletsToRemove.push(b.id);
         }
 
-        // Collision Detection
         for (const playerId in room.players) {
             const player = room.players[playerId];
 
@@ -522,11 +521,8 @@ function updateRoom(room) {
             if (b.pierce && b.hitList.includes(playerId)) continue;
 
             if (getDistance(b, player) < PLAYER_RADIUS + 6) { 
-                
-                // --- HIT LOGIC ---
-                // Check Shield
                 if (player.shield) {
-                    player.shield = false; // Break Shield
+                    player.shield = false; 
                     player.cooldowns.utility = Date.now() + COOLDOWNS.shield;
                     io.to(room.id).emit('visualEffect', { type: 'shieldBreak', x: player.x, y: player.y });
                     io.to(room.id).emit('cooldownUpdate', { id: playerId, cooldowns: player.cooldowns });
@@ -535,11 +531,9 @@ function updateRoom(room) {
                     break;
                 } 
                 else {
-                    // Direct Damage
                     player.hp -= b.damage;
-                    player.lastDamageTime = Date.now(); // Reset Regen Timer
+                    player.lastDamageTime = Date.now(); 
 
-                    // Handle Explosive
                     if (b.explosive) {
                         for(const targetId in room.players) {
                              if(targetId === b.ownerId) continue; 
@@ -575,7 +569,8 @@ function updateRoom(room) {
         stateChanged = true;
     }
 
-    if (stateChanged || room.bullets.length > 0) {
+    // Only send bullet updates on the broadcast tick OR if bullets changed state (hit/die)
+    if (stateChanged || (room.bullets.length > 0 && shouldBroadcast)) {
         io.to(room.id).emit('projectilesUpdate', room.bullets);
     }
 }
@@ -591,7 +586,6 @@ function findRoomAndEnd(socketId, reason, winnerId) {
 
 function endGame(roomId, reason, winnerId, loserId) {
     if (rooms[roomId]) {
-        // Clear timers
         Object.keys(rooms[roomId].players).forEach(pid => {
             if (disconnectTimers[pid]) {
                 clearInterval(disconnectTimers[pid]);
