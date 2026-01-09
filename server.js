@@ -34,6 +34,7 @@ const DASH_DURATION = 500;
 const DASH_MULTIPLIER = 2.5;   
 const CLOAK_DURATION = 5000;
 const SHIELD_DURATION = 10000;
+const REPULSE_DURATION = 1500; // How long "Pinball Mode" lasts
 
 const COOLDOWNS = {
     rifle: 200,    
@@ -137,6 +138,7 @@ io.on('connection', (socket) => {
             // Status Flags
             shield: false,
             invisible: false,
+            repulseEndTime: 0, // NEW: Tracks when Pinball mode ends
             speedMult: 1.0
         };
 
@@ -179,7 +181,6 @@ io.on('connection', (socket) => {
             const player = rooms[data.roomID].players[socket.id];
             
             // PHYSICS CHECK: Ignore client position if being knocked back by server
-            // increased threshold slightly to 2 to catch the "start" of a knockback
             if (Math.abs(player.vx) < 2 && Math.abs(player.vy) < 2) {
                 player.x = data.x;
                 player.y = data.y;
@@ -251,21 +252,24 @@ io.on('connection', (socket) => {
                     
                     if (dist < 400) { 
                         const angle = Math.atan2(dy, dx);
-                        const force = 35; // Increased Force
+                        const force = 80; // <<< WAY STRONGER FORCE
                         
-                        // Apply Velocity
-                        enemy.vx += Math.cos(angle) * force;
-                        enemy.vy += Math.sin(angle) * force;
+                        // Apply Massive Velocity
+                        enemy.vx = Math.cos(angle) * force;
+                        enemy.vy = Math.sin(angle) * force;
 
-                        // Notify Victim
-                        io.to(pid).emit('forcePush', { angle: angle, force: 15 }); 
+                        // <<< PINBALL MODE ACTIVATED >>>
+                        // We set a flag that lasts for 1.5 seconds. 
+                        // The physics loop will see this and disable friction + enable high bounce.
+                        enemy.repulseEndTime = Date.now() + REPULSE_DURATION; 
+
+                        // Notify Victim (Visuals/Camera Shake)
+                        io.to(pid).emit('forcePush', { angle: angle, force: 30 }); 
                         hitAnyone = true;
                     }
                 });
 
-                // === FIX: IMMEDIATE BROADCAST ===
-                // If we hit someone, update ALL clients immediately so the push starts NOW.
-                // We don't want to wait for the next tick loop.
+                // === IMMEDIATE BROADCAST ===
                 if(hitAnyone) {
                     broadcastRoomState(room);
                 }
@@ -406,8 +410,6 @@ setInterval(() => {
     }
 }, TICK_RATE);
 
-// HELPER: Broadcast Function (Extracted for re-use)
-// This makes the loop cleaner and allows us to call it instantly from Repulse
 function broadcastRoomState(room) {
     const playerIds = Object.keys(room.players);
     if (playerIds.length !== 2) return;
@@ -415,7 +417,7 @@ function broadcastRoomState(room) {
     const p1 = room.players[playerIds[0]];
     const p2 = room.players[playerIds[1]];
     
-    // SEND OPPONENT DATA (What you were already doing)
+    // Send Opponent Data
     io.to(playerIds[1]).emit('opponentUpdate', { 
         x: p1.x, y: p1.y, vx: p1.vx, vy: p1.vy, angle: p1.angle, 
         invisible: p1.invisible, shield: p1.shield 
@@ -425,8 +427,7 @@ function broadcastRoomState(room) {
         invisible: p2.invisible, shield: p2.shield 
     });
 
-    // === NEW: SEND SELF CORRECTION DATA ===
-    // This tells the client "Here is where you actually are"
+    // Send Self Correction (Crucial for Knockback syncing)
     io.to(playerIds[0]).emit('selfUpdate', { x: p1.x, y: p1.y, vx: p1.vx, vy: p1.vy, hp: p1.hp });
     io.to(playerIds[1]).emit('selfUpdate', { x: p2.x, y: p2.y, vx: p2.vx, vy: p2.vy, hp: p2.hp });
 }
@@ -440,35 +441,58 @@ function updateRoom(room) {
 
     // 1. PHYSICS UPDATE FOR PLAYERS
     const playerIds = Object.keys(room.players);
-    let highVelocityActive = false; // Flag to check if we need 60Hz updates
+    let highVelocityActive = false; 
 
     playerIds.forEach(pid => {
         const p = room.players[pid];
 
-        // Apply Velocity (Repulse/Dash)
         if (Math.abs(p.vx) > 0.1 || Math.abs(p.vy) > 0.1) {
             
-            // === FIX: DETECT HIGH SPEED ===
-            // If speed is high (>2), the player is likely flying from a hit.
-            // We enable highVelocityActive to force 60Hz updates.
+            // --- PINBALL PHYSICS CHECK ---
+            const isPinball = (p.repulseEndTime && p.repulseEndTime > now);
+
+            // Determine Friction
+            let friction = 0.92; // Standard Floor friction
+            if (isPinball) friction = 1.0; // ZERO Friction (slides forever)
+
+            // Determine Wall Bounce
+            let wallBounce = -0.5; // Standard 'dull' bounce
+            if (isPinball) wallBounce = -1.0; // PERFECT BOUNCE (Keeps all speed)
+
+            // Adaptive Network Rate: If flying fast, force updates
             if (Math.abs(p.vx) > 2 || Math.abs(p.vy) > 2) {
                 highVelocityActive = true;
             }
 
             p.x += p.vx;
             p.y += p.vy;
-            p.vx *= 0.92; // Friction
-            p.vy *= 0.92;
+            
+            p.vx *= friction; 
+            p.vy *= friction;
 
-            // Stop if too slow
-            if (Math.abs(p.vx) < 0.1) p.vx = 0;
-            if (Math.abs(p.vy) < 0.1) p.vy = 0;
+            // Stop if too slow (only if not in pinball mode)
+            if (!isPinball) {
+                if (Math.abs(p.vx) < 0.1) p.vx = 0;
+                if (Math.abs(p.vy) < 0.1) p.vy = 0;
+            }
 
-            // Map Boundaries
-            if (p.x < PLAYER_RADIUS) { p.x = PLAYER_RADIUS; p.vx *= -0.5; }
-            if (p.x > MAP_WIDTH - PLAYER_RADIUS) { p.x = MAP_WIDTH - PLAYER_RADIUS; p.vx *= -0.5; }
-            if (p.y < PLAYER_RADIUS) { p.y = PLAYER_RADIUS; p.vy *= -0.5; }
-            if (p.y > MAP_HEIGHT - PLAYER_RADIUS) { p.y = MAP_HEIGHT - PLAYER_RADIUS; p.vy *= -0.5; }
+            // Map Boundaries (With Dynamic Bounce)
+            if (p.x < PLAYER_RADIUS) { 
+                p.x = PLAYER_RADIUS; 
+                p.vx *= wallBounce; 
+            }
+            if (p.x > MAP_WIDTH - PLAYER_RADIUS) { 
+                p.x = MAP_WIDTH - PLAYER_RADIUS; 
+                p.vx *= wallBounce; 
+            }
+            if (p.y < PLAYER_RADIUS) { 
+                p.y = PLAYER_RADIUS; 
+                p.vy *= wallBounce; 
+            }
+            if (p.y > MAP_HEIGHT - PLAYER_RADIUS) { 
+                p.y = MAP_HEIGHT - PLAYER_RADIUS; 
+                p.vy *= wallBounce; 
+            }
         }
 
         // Regen Logic
@@ -479,9 +503,7 @@ function updateRoom(room) {
         }
     });
 
-    // === FIX: ADAPTIVE NETWORK RATE ===
-    // If High Velocity Mode is ON, we broadcast EVERY tick (60Hz).
-    // If it is OFF, we broadcast every 2nd tick (30Hz) to save bandwidth.
+    // Send updates every 2nd tick (30Hz), UNLESS high speed event (60Hz)
     const shouldBroadcast = highVelocityActive || (room.tickCount % BROADCAST_RATE === 0);
 
     if (shouldBroadcast) {
@@ -533,7 +555,7 @@ function updateRoom(room) {
                              if (dist < b.blastRadius) {
                                  target.hp -= b.blastDamage; target.lastDamageTime = Date.now();
                              }
-                        }
+                         }
                     }
                     
                     io.to(room.id).emit('playerDamage', { id: playerId, hp: player.hp });
