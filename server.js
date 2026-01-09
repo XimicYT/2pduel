@@ -26,18 +26,18 @@ const BASE_HP = 100;
 const PLAYER_RADIUS = 30;
 
 // --- ABILITY CONSTANTS ---
-const REGEN_DELAY = 5000;      // 5 seconds without damage to start regen
-const REGEN_RATE = 2;          // HP per second
-const DASH_DURATION = 500;     // 0.5 seconds
-const DASH_MULTIPLIER = 2.5;   // +150% speed
+const REGEN_DELAY = 5000;      
+const REGEN_RATE = 2;          
+const DASH_DURATION = 500;     
+const DASH_MULTIPLIER = 2.5;   
 const CLOAK_DURATION = 5000;
 const SHIELD_DURATION = 10000;
 
 const COOLDOWNS = {
-    rifle: 200,    
+    rifle: 200,   
     pistol: 400,   
     dash: 3000,
-    shield: 12000, // Starts AFTER shield breaks
+    shield: 12000, 
     cloak: 8000,
     repulse: 6000
 };
@@ -59,7 +59,7 @@ const WEAPONS = {
     'knife':  { type: 'gun', damage: 60, speed: 35, cooldown: 500, range: 100, color: '#ffffff', size: 10, desc: "Melee Slash" },
     'mine':   { type: 'mine', damage: 60, speed: 0, cooldown: 4000, range: 9999, color: '#ff0000', life: 8000, desc: "Proximity Mine" },
 
-    // --- UTILITIES (Reference only, logic handled in playerShoot) ---
+    // --- UTILITIES ---
     'repulse': { cooldown: COOLDOWNS.repulse },
     'dash':    { cooldown: COOLDOWNS.dash },
     'shield':  { cooldown: COOLDOWNS.shield },
@@ -111,7 +111,7 @@ io.on('connection', (socket) => {
         const finalPlayerData = {
             username: cleanName,
             perk: chosenPerk,
-            primary:   WEAPONS[playerData.primary]   ? playerData.primary   : 'pulse',
+            primary:   WEAPONS[playerData.primary]    ? playerData.primary    : 'pulse',
             secondary: WEAPONS[playerData.secondary] ? playerData.secondary : 'pistol',
             utility:   playerData.utility || 'dash'
         };
@@ -122,6 +122,10 @@ io.on('connection', (socket) => {
             hp: startingHp, 
             maxHp: startingHp,
             x: 0, y: 0, angle: 0,
+            
+            // PHYSICS ADDITION: Velocity
+            vx: 0, 
+            vy: 0, 
             
             // NEW: State Tracking
             lastShootTime: 0,
@@ -173,15 +177,23 @@ io.on('connection', (socket) => {
     socket.on('playerUpdate', (data) => {
         if (rooms[data.roomID] && rooms[data.roomID].players[socket.id]) {
             const player = rooms[data.roomID].players[socket.id];
-            player.x = data.x;
-            player.y = data.y;
+            
+            // === CRITICAL FIX FOR PHYSICS ===
+            // If the player is being knocked back (high velocity on server), 
+            // IGNORE the client's x/y to prevent snapping back.
+            // Only accept client position if server velocity is low (normal movement)
+            if (Math.abs(player.vx) < 1 && Math.abs(player.vy) < 1) {
+                player.x = data.x;
+                player.y = data.y;
+            }
+
             player.angle = data.angle;
             
             // Sync movement + Status flags to opponent
             socket.to(data.roomID).emit('opponentUpdate', { 
                 id: socket.id, 
-                x: data.x, 
-                y: data.y, 
+                x: player.x, 
+                y: player.y, 
                 angle: data.angle,
                 invisible: player.invisible,
                 shield: player.shield
@@ -207,11 +219,15 @@ io.on('connection', (socket) => {
             let cdTime = 0;
 
             if (utilType === 'dash') {
-                // Thruster Dash: +150% speed for 0.5s
+                // SERVER SIDE DASH PHYSICS
+                // Instead of just setting speedMult, we apply raw velocity
+                const dashPower = 30;
+                p.vx = Math.cos(p.angle) * dashPower;
+                p.vy = Math.sin(p.angle) * dashPower;
+
                 p.speedMult = DASH_MULTIPLIER;
                 io.to(room.id).emit('applyBuff', { id: socket.id, type: 'speed', val: p.speedMult, duration: DASH_DURATION });
                 
-                // Reset speed after duration
                 setTimeout(() => { 
                     if(rooms[data.roomID]?.players[socket.id]) p.speedMult = 1.0; 
                 }, DASH_DURATION);
@@ -219,23 +235,18 @@ io.on('connection', (socket) => {
                 cdTime = COOLDOWNS.dash;
             } 
             else if (utilType === 'shield') {
-                // Energy Shield: Invulnerable until hit or 10s
                 p.shield = true;
-                // Note: Cooldown does NOT start yet. It starts when shield breaks.
                 cdTime = 0; 
                 
-                // Auto-expire shield if not broken
                 setTimeout(() => {
                     if(rooms[data.roomID]?.players[socket.id]?.shield) {
                         rooms[data.roomID].players[socket.id].shield = false;
-                        // Start cooldown NOW
                         rooms[data.roomID].players[socket.id].cooldowns.utility = Date.now() + COOLDOWNS.shield;
                         io.to(data.roomID).emit('cooldownUpdate', { id: socket.id, cooldowns: rooms[data.roomID].players[socket.id].cooldowns });
                     }
                 }, SHIELD_DURATION);
             }
             else if (utilType === 'cloak') {
-                // Optical Cloak: Invisible for 5s
                 p.invisible = true;
                 cdTime = COOLDOWNS.cloak;
                 setTimeout(() => { 
@@ -243,7 +254,6 @@ io.on('connection', (socket) => {
                 }, CLOAK_DURATION);
             }
             else if (utilType === 'repulse') {
-                // Repulse Wave: Push enemies
                 cdTime = COOLDOWNS.repulse;
                 io.to(room.id).emit('visualEffect', { type: 'repulse', x: p.x, y: p.y });
 
@@ -254,25 +264,30 @@ io.on('connection', (socket) => {
                     const dy = enemy.y - p.y;
                     const dist = Math.sqrt(dx*dx + dy*dy);
                     
-                    if (dist < 350) { // Range
+                    if (dist < 400) { // Range
                         const angle = Math.atan2(dy, dx);
-                        io.to(pid).emit('forcePush', { angle: angle, force: 40 }); // Strong push
+                        
+                        // SERVER SIDE REPULSE PHYSICS
+                        // Apply velocity directly to enemy state
+                        const force = 30; // Strong push
+                        enemy.vx += Math.cos(angle) * force;
+                        enemy.vy += Math.sin(angle) * force;
+
+                        // Also emit forcePush for visual shake, but physics is now server-authoritative
+                        io.to(pid).emit('forcePush', { angle: angle, force: 15 }); 
                     }
                 });
             }
 
-            // Apply Cooldown (Except for Shield, handled separately)
             if (utilType !== 'shield') {
                 p.cooldowns.utility = now + cdTime;
             }
             
-            // Sync Cooldowns to Client
             io.to(room.id).emit('cooldownUpdate', { id: socket.id, cooldowns: p.cooldowns });
             return;
         }
 
         // 3. WEAPON LOGIC
-        // Shooting breaks Invisibility
         if (p.invisible) {
             p.invisible = false;
         }
@@ -280,7 +295,6 @@ io.on('connection', (socket) => {
         const weaponKey = slot === 'primary' ? p.primary : p.secondary;
         const stats = WEAPONS[weaponKey];
         
-        // Perk Haste check
         let actualCD = stats.cooldown;
         if (p.perk === 'haste') actualCD *= 0.85;
         p.cooldowns[slot] = now + actualCD;
@@ -336,7 +350,6 @@ io.on('connection', (socket) => {
             });
         }
         
-        // Update Cooldowns on Client
         io.to(room.id).emit('cooldownUpdate', { id: socket.id, cooldowns: p.cooldowns });
     });
 
@@ -357,6 +370,10 @@ io.on('connection', (socket) => {
             delete rooms[roomID].players[oldSocketID];
             rooms[roomID].players[socket.id] = pData;
             pData.id = socket.id;
+            
+            // Reset velocity on reconnect to prevent flying off
+            pData.vx = 0;
+            pData.vy = 0;
 
             socket.join(roomID);
             socket.emit('reconnectSuccess', { roomID, me: pData, players: rooms[roomID].players });
@@ -421,20 +438,59 @@ function updateRoom(room) {
     const now = Date.now();
     let stateChanged = false;
     
-    // 1. REGEN & BUFF MANAGEMENT
-    for (const pid in room.players) {
+    // 1. PHYSICS UPDATE FOR PLAYERS
+    // This runs on the server, ensuring movement even if client is tabbed out
+    const playerIds = Object.keys(room.players);
+    let anyPlayerMoved = false;
+
+    playerIds.forEach(pid => {
         const p = room.players[pid];
-        
+
+        // Apply Velocity (from Repulse or Dash)
+        if (Math.abs(p.vx) > 0.1 || Math.abs(p.vy) > 0.1) {
+            p.x += p.vx;
+            p.y += p.vy;
+            
+            // Friction
+            p.vx *= 0.92;
+            p.vy *= 0.92;
+
+            // Stop if too slow
+            if (Math.abs(p.vx) < 0.1) p.vx = 0;
+            if (Math.abs(p.vy) < 0.1) p.vy = 0;
+
+            // Map Boundaries
+            if (p.x < PLAYER_RADIUS) { p.x = PLAYER_RADIUS; p.vx *= -0.5; }
+            if (p.x > MAP_WIDTH - PLAYER_RADIUS) { p.x = MAP_WIDTH - PLAYER_RADIUS; p.vx *= -0.5; }
+            if (p.y < PLAYER_RADIUS) { p.y = PLAYER_RADIUS; p.vy *= -0.5; }
+            if (p.y > MAP_HEIGHT - PLAYER_RADIUS) { p.y = MAP_HEIGHT - PLAYER_RADIUS; p.vy *= -0.5; }
+
+            anyPlayerMoved = true;
+        }
+
         // Regen Logic (2 HP/sec if no damage for 5s)
         if (p.hp < p.maxHp && p.hp > 0) {
             if (now - p.lastDamageTime > REGEN_DELAY) {
                 p.hp = Math.min(p.maxHp, p.hp + (REGEN_RATE / 60)); // Add per tick
             }
         }
+    });
 
-        // Expire Buffs just in case (though setTimeout handles most)
-        if (p.invisible && p.cooldowns.utility < now && p.utility === 'cloak') {
-             // Redundant safeguard
+    // If server moved players (Repulse/Dash), broadcast to everyone
+    // This ensures opponent sees the push even if the target is AFK/Tabbed out
+    if (anyPlayerMoved) {
+        if (playerIds.length === 2) {
+            const p1 = room.players[playerIds[0]];
+            const p2 = room.players[playerIds[1]];
+            
+            io.to(playerIds[1]).emit('opponentUpdate', { 
+                x: p1.x, y: p1.y, angle: p1.angle, 
+                invisible: p1.invisible, shield: p1.shield 
+            });
+            io.to(playerIds[0]).emit('opponentUpdate', { 
+                x: p2.x, y: p2.y, angle: p2.angle, 
+                invisible: p2.invisible, shield: p2.shield 
+            });
         }
     }
 
@@ -470,17 +526,12 @@ function updateRoom(room) {
                 // --- HIT LOGIC ---
                 // Check Shield
                 if (player.shield) {
-                    // Shield Blocks Hit!
                     player.shield = false; // Break Shield
-                    
-                    // Start Cooldown NOW
                     player.cooldowns.utility = Date.now() + COOLDOWNS.shield;
-                    
                     io.to(room.id).emit('visualEffect', { type: 'shieldBreak', x: player.x, y: player.y });
                     io.to(room.id).emit('cooldownUpdate', { id: playerId, cooldowns: player.cooldowns });
                     io.to(room.id).emit('opponentUpdate', { id: playerId, x: player.x, y: player.y, angle: player.angle, shield: false });
-                    
-                    bulletsToRemove.push(b.id); // Bullet destroyed on shield
+                    bulletsToRemove.push(b.id);
                     break;
                 } 
                 else {
