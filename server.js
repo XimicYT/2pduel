@@ -23,16 +23,31 @@ const BLEED_DAMAGE = 5; // Damage per second when disconnected
 const PLAYER_RADIUS = 30;
 
 // 3. WEAPON DATABASE
+// These keys match the value="" in your HTML select menus exactly.
 const WEAPONS = {
-    // Primary
-    'rifle':    { damage: 12, speed: 20, cooldown: 150,  range: 1000, color: '#ffff00' },
-    'sniper':   { damage: 45, speed: 35, cooldown: 1200, range: 2000, color: '#ff0000' },
-    'shotgun':  { damage: 8,  speed: 18, cooldown: 800,  range: 400,  color: '#ffa500', count: 5, spread: 0.2 },
-    // Secondary
-    'pistol':   { damage: 10, speed: 18, cooldown: 300,  range: 800,  color: '#cccccc' },
-    'revolver': { damage: 25, speed: 22, cooldown: 600,  range: 900,  color: '#aa6600' },
-    // Utility
-    'grenade':  { damage: 60, speed: 10, cooldown: 3000, range: 600,  color: '#00ff00', type: 'explosive' }
+    // --- PRIMARY ---
+    'pulse':   { damage: 12, speed: 22, cooldown: 150,  range: 1100, color: '#00f3ff' }, // Standard Rifle
+    'rail':    { damage: 45, speed: 45, cooldown: 1300, range: 3000, color: '#ff0055' }, // Sniper
+    'scatter': { damage: 8,  speed: 20, cooldown: 850,  range: 500,  color: '#ffff00', count: 6, spread: 0.35 }, // Shotgun
+    'void':    { damage: 60, speed: 14, cooldown: 2000, range: 900,  color: '#9900ff' }, // Rocket-like
+    'twin':    { damage: 9,  speed: 26, cooldown: 70,   range: 750,  color: '#00ffaa' }, // Rapid SMG
+
+    // --- SECONDARY ---
+    'pistol':  { damage: 12, speed: 18, cooldown: 300,  range: 800,  color: '#cccccc' },
+    'mag':     { damage: 28, speed: 25, cooldown: 600,  range: 1000, color: '#ffaa00' }, // Heavy Pistol
+    'knife':   { damage: 50, speed: 30, cooldown: 500,  range: 150,  color: '#ffffff' }, // Melee
+    'mine':    { damage: 80, speed: 2,  cooldown: 3000, range: 400,  color: '#ff0000' }, // Slow Trap
+
+    // --- UTILITY ---
+    // Mapped to projectiles for now to prevent crashes.
+    'repulse': { damage: 10, speed: 15, cooldown: 4000, range: 350,  color: '#ffffff', count: 12, spread: 6.28 }, // 360 wave
+    'dash':    { damage: 0,  speed: 0,  cooldown: 1000, range: 0,    color: 'transparent' }, // Placeholder
+    'shield':  { damage: 0,  speed: 0,  cooldown: 1000, range: 0,    color: 'transparent' }, // Placeholder
+    'cloak':   { damage: 0,  speed: 0,  cooldown: 1000, range: 0,    color: 'transparent' }, // Placeholder
+    
+    // Fallbacks (Legacy)
+    'rifle':   { damage: 12, speed: 20, cooldown: 150,  range: 1000, color: '#ffff00' },
+    'grenade': { damage: 60, speed: 10, cooldown: 3000, range: 600,  color: '#00ff00' }
 };
 
 // 4. STATE MANAGEMENT
@@ -75,17 +90,17 @@ io.on('connection', (socket) => {
         }
 
         // Prepare Player Object with Loadout
+        // CRITICAL FIX: Ensure we use the keys sent by HTML, or fallback safely
         const finalPlayerData = {
             username: cleanName,
             classType: playerData.classType || 'assault',
-            // Default to 'rifle' if primary is missing/null
-            primary: playerData.primary || 'rifle',     
-            // Default to 'pistol' if secondary is missing/null
-            secondary: playerData.secondary || 'pistol', 
-            // Default to 'grenade' if utility is missing/null
-            utility: playerData.utility || 'grenade'     
+            primary:   WEAPONS[playerData.primary]   ? playerData.primary   : 'pulse',
+            secondary: WEAPONS[playerData.secondary] ? playerData.secondary : 'pistol',
+            utility:   WEAPONS[playerData.utility]   ? playerData.utility   : 'repulse'
         };
-        console.log(`Player ${cleanName} joined queue with:`, finalPlayerData);
+
+        console.log(`Player ${cleanName} joined. Loadout: ${finalPlayerData.primary}, ${finalPlayerData.secondary}, ${finalPlayerData.utility}`);
+
         if (waitingPlayer) {
             // Create Match
             const roomID = `room_${Date.now()}`;
@@ -192,42 +207,40 @@ io.on('connection', (socket) => {
         }
     });
 
-    // --- RECONNECT (FIXED) ---
-    // --- RECONNECT (FIXED) ---
-socket.on('reconnectRequest', (data) => {
-    const { roomID, oldSocketID } = data;
+    // --- RECONNECT ---
+    socket.on('reconnectRequest', (data) => {
+        const { roomID, oldSocketID } = data;
 
-    if (rooms[roomID] && rooms[roomID].players[oldSocketID]) {
-        // 1. Stop the bleed timer immediately
-        if (disconnectTimers[oldSocketID]) {
-            clearInterval(disconnectTimers[oldSocketID]);
-            delete disconnectTimers[oldSocketID];
+        if (rooms[roomID] && rooms[roomID].players[oldSocketID]) {
+            // 1. Stop the bleed timer immediately
+            if (disconnectTimers[oldSocketID]) {
+                clearInterval(disconnectTimers[oldSocketID]);
+                delete disconnectTimers[oldSocketID];
+            }
+
+            const pData = rooms[roomID].players[oldSocketID];
+            
+            // Update the socket ID mapping
+            delete rooms[roomID].players[oldSocketID];
+            rooms[roomID].players[socket.id] = pData;
+
+            socket.join(roomID);
+            
+            // 2. Tell the player they are back (Load the game)
+            socket.emit('reconnectSuccess', { roomID, me: pData, players: rooms[roomID].players });
+            
+            // 3. Tell EVERYONE to reset state and start countdown
+            setTimeout(() => {
+                io.to(roomID).emit('matchResumed', { 
+                    reconnectedId: socket.id, 
+                    resumeIn: 3 
+                });
+            }, 100); 
+            
+        } else {
+            socket.emit('reconnectFailed');
         }
-
-        const pData = rooms[roomID].players[oldSocketID];
-        
-        // Update the socket ID mapping
-        delete rooms[roomID].players[oldSocketID];
-        rooms[roomID].players[socket.id] = pData;
-
-        socket.join(roomID);
-        
-        // 2. Tell the player they are back (Load the game)
-        socket.emit('reconnectSuccess', { roomID, me: pData, players: rooms[roomID].players });
-        
-        // 3. Tell EVERYONE to reset state and start countdown
-        // We add a tiny delay to ensure the client has loaded the game screen first
-        setTimeout(() => {
-            io.to(roomID).emit('matchResumed', { 
-                reconnectedId: socket.id, 
-                resumeIn: 3 
-            });
-        }, 100); // 100ms buffer
-        
-    } else {
-        socket.emit('reconnectFailed');
-    }
-});
+    });
 
     // --- DISCONNECT ---
     socket.on('disconnect', () => {
