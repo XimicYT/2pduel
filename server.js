@@ -3,6 +3,9 @@ const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
 
+// ==================================================================
+// 1. SETUP SERVER
+// ==================================================================
 const app = express();
 app.use(cors());
 
@@ -14,114 +17,57 @@ const io = new Server(server, {
 const PORT = process.env.PORT || 3000;
 
 // ==================================================================
-// 1. CONFIGURATION
+// 2. CONFIGURATION & CONSTANTS
 // ==================================================================
 const TICK_RATE = 1000 / 60; 
 const MAP_WIDTH = 1920;
 const MAP_HEIGHT = 1080;
 const BASE_HP = 100;
-const BLEED_DAMAGE = 5; 
 const PLAYER_RADIUS = 30;
 
-// ==================================================================
-// 2. WEAPON & UTILITY DEFINITIONS
-// ==================================================================
-const WEAPONS = {
-    // --- PRIMARY WEAPONS ---
-    'pulse': { 
-        type: 'gun', 
-        damage: 12,     // 9 shots to kill
-        speed: 22,      // Standard travel time
-        cooldown: 140,  // Fast fire rate
-        range: 1100,    // Mid-Long range
-        color: '#00f3ff',
-        desc: "Standard Energy Rifle. Reliable."
-    }, 
-    'rail': { 
-        type: 'gun', 
-        damage: 45,     // 3 shots to kill (High Burst)
-        speed: 50,      // Near instant hit
-        cooldown: 1300, // Very slow fire rate
-        range: 2500,    // Cross-map range
-        color: '#ff0055',
-        desc: "High velocity Sniper. Precision required."
-    }, 
-    'scatter': { 
-        type: 'gun', 
-        damage: 7,      // Per pellet (6 pellets = 42 potential dmg)
-        speed: 22, 
-        cooldown: 850, 
-        range: 550,     // Short range only
-        color: '#ffff00', 
-        count: 6,       // Fires 6 bullets at once
-        spread: 0.4,    // Wide cone
-        desc: "Shotgun. Devastating close range."
-    }, 
-    'void': { 
-        type: 'gun', 
-        damage: 55,     // Massive damage
-        speed: 13,      // Very slow projectile (Dodgeable)
-        cooldown: 1800, 
-        range: 1200, 
-        color: '#9900ff', 
-        size: 14,       // Larger hitbox
-        desc: "Plasma Launcher. Slow but deadly."
-    }, 
-    'twin': { 
-        type: 'gun', 
-        damage: 8,      // Low dmg
-        speed: 26, 
-        cooldown: 60,   // Extreme fire rate (Machine gun)
-        range: 750, 
-        color: '#00ffaa', 
-        desc: "Rapid fire SMG. Spray and pray."
-    }, 
+// --- ABILITY CONSTANTS ---
+const REGEN_DELAY = 5000;      // 5 seconds without damage to start regen
+const REGEN_RATE = 2;          // HP per second
+const DASH_DURATION = 500;     // 0.5 seconds
+const DASH_MULTIPLIER = 2.5;   // +150% speed
+const CLOAK_DURATION = 5000;
+const SHIELD_DURATION = 10000;
 
-    // --- SECONDARY WEAPONS ---
-    'pistol': { 
-        type: 'gun', damage: 14, speed: 20, cooldown: 300, range: 900, color: '#cccccc',
-        desc: "Standard sidearm."
-    },
-    'mag': { 
-        type: 'gun', damage: 32, speed: 30, cooldown: 700, range: 1200, color: '#ffaa00',
-        desc: "Heavy Pistol. Good finisher."
-    }, 
-    'mine': { 
-        type: 'mine', 
-        damage: 60, 
-        speed: 0, 
-        cooldown: 4000, 
-        range: 9999, // Range acts as lifetime for mines
-        color: '#ff0000', 
-        life: 8000, // Lasts 8 seconds on floor
-        desc: "Stationary proximity mine."
-    }, 
-
-    // --- UTILITIES ---
-    'repulse': { 
-        type: 'gun', 
-        damage: 15, 
-        speed: 12, 
-        cooldown: 5000, 
-        range: 350, 
-        color: '#ffffff', 
-        count: 16,      // 16 bullets in a circle
-        spread: 6.28,   // 360 degrees
-        desc: "Shockwave. Pushes enemies back."
-    }, 
-    'dash': { 
-        type: 'dash', 
-        distance: 250, 
-        cooldown: 2500,
-        desc: "Instant teleport forward."
-    },
-    
-    // Fallback
-    'default': { type: 'gun', damage: 10, speed: 20, cooldown: 200 }
+const COOLDOWNS = {
+    rifle: 200,    
+    pistol: 400,   
+    dash: 3000,
+    shield: 12000, // Starts AFTER shield breaks
+    cloak: 8000,
+    repulse: 6000
 };
 
 // ==================================================================
-// 3. STATE & HELPERS
+// 3. WEAPON DEFINITIONS
+// ==================================================================
+const WEAPONS = {
+    // --- PRIMARY ---
+    'pulse': { type: 'gun', damage: 12, speed: 22, cooldown: 140, range: 1100, color: '#00f3ff', desc: "Standard Rifle" },
+    'rail':  { type: 'gun', damage: 40, speed: 60, cooldown: 1500, range: 3000, color: '#ff0055', pierce: true, desc: "Piercing Sniper" },
+    'scatter': { type: 'gun', damage: 7, speed: 22, cooldown: 850, range: 550, color: '#ffff00', count: 6, spread: 0.4, desc: "Shotgun" },
+    'void':  { type: 'gun', damage: 20, speed: 14, cooldown: 1800, range: 1100, color: '#9900ff', size: 14, explosive: true, blastRadius: 180, blastDamage: 40, desc: "Explosive Launcher" },
+    'twin':  { type: 'gun', damage: 8, speed: 26, cooldown: 60, range: 750, color: '#00ffaa', desc: "Rapid SMG" },
+
+    // --- SECONDARY ---
+    'pistol': { type: 'gun', damage: 14, speed: 20, cooldown: 300, range: 900, color: '#cccccc', desc: "Sidearm" },
+    'mag':    { type: 'gun', damage: 32, speed: 30, cooldown: 700, range: 1200, color: '#ffaa00', desc: "Heavy Pistol" },
+    'knife':  { type: 'gun', damage: 60, speed: 35, cooldown: 500, range: 100, color: '#ffffff', size: 10, desc: "Melee Slash" },
+    'mine':   { type: 'mine', damage: 60, speed: 0, cooldown: 4000, range: 9999, color: '#ff0000', life: 8000, desc: "Proximity Mine" },
+
+    // --- UTILITIES (Reference only, logic handled in playerShoot) ---
+    'repulse': { cooldown: COOLDOWNS.repulse },
+    'dash':    { cooldown: COOLDOWNS.dash },
+    'shield':  { cooldown: COOLDOWNS.shield },
+    'cloak':   { cooldown: COOLDOWNS.cloak }
+};
+
+// ==================================================================
+// 4. STATE MANAGEMENT
 // ==================================================================
 let rooms = {}; 
 let waitingPlayer = null; 
@@ -132,12 +78,12 @@ function getDistance(a, b) {
 }
 
 // ==================================================================
-// 4. SOCKET LOGIC
+// 5. SOCKET LOGIC
 // ==================================================================
 io.on('connection', (socket) => {
     console.log(`User Connected: ${socket.id}`);
 
-    // --- JOIN QUEUE ---
+    // --- MATCHMAKING ---
     socket.on('joinQueue', (playerData) => {
         const cleanName = (playerData.username || "Agent").substring(0, 12).replace(/[^a-zA-Z0-9 _-]/g, "");
         const chosenPerk = playerData.perk || 'vitality';
@@ -159,40 +105,51 @@ io.on('connection', (socket) => {
             return;
         }
 
-        // PERK LOGIC: HEALTH
-        // If Perk is Vitality, HP is 125, else 100.
         const startingHp = chosenPerk === 'vitality' ? 125 : BASE_HP;
 
+        // Construct Player Object
         const finalPlayerData = {
             username: cleanName,
-            perk: chosenPerk, // Store perk so client knows (for speed)
+            perk: chosenPerk,
             primary:   WEAPONS[playerData.primary]   ? playerData.primary   : 'pulse',
             secondary: WEAPONS[playerData.secondary] ? playerData.secondary : 'pistol',
-            utility:   WEAPONS[playerData.utility]   ? playerData.utility   : 'repulse'
+            utility:   playerData.utility || 'dash'
+        };
+
+        const newPlayerState = {
+            ...finalPlayerData,
+            id: socket.id,
+            hp: startingHp, 
+            maxHp: startingHp,
+            x: 0, y: 0, angle: 0,
+            
+            // NEW: State Tracking
+            lastShootTime: 0,
+            lastDamageTime: 0, // For Regen
+            cooldowns: { primary: 0, secondary: 0, utility: 0 },
+            
+            // Status Flags
+            shield: false,
+            invisible: false,
+            speedMult: 1.0
         };
 
         if (waitingPlayer) {
-            // MATCH FOUND
+            // Match Found
             const roomID = `room_${Date.now()}`;
             const p1ID = waitingPlayer.id;
             const p2ID = socket.id;
+
+            // Set Spawn Positions
+            const p1State = { ...waitingPlayer.state, id: p1ID, x: 100, y: 540, angle: 0 };
+            const p2State = { ...newPlayerState, id: p2ID, x: 1820, y: 540, angle: Math.PI };
 
             rooms[roomID] = {
                 id: roomID,
                 bullets: [],
                 players: {
-                    [p1ID]: { 
-                        ...waitingPlayer.data, id: p1ID,
-                        hp: waitingPlayer.hp, maxHp: waitingPlayer.hp, // Use calculated HP
-                        x: 100, y: 540, angle: 0,
-                        lastShootTime: 0 
-                    },
-                    [p2ID]: { 
-                        ...finalPlayerData, id: p2ID,
-                        hp: startingHp, maxHp: startingHp, // Use calculated HP
-                        x: 1820, y: 540, angle: Math.PI,
-                        lastShootTime: 0
-                    }
+                    [p1ID]: p1State,
+                    [p2ID]: p2State
                 }
             };
 
@@ -202,12 +159,12 @@ io.on('connection', (socket) => {
             io.to(roomID).emit('matchFound', { roomID, players: rooms[roomID].players });
             waitingPlayer = null; 
         } else {
-            // WAITING
+            // Wait in Queue
             waitingPlayer = { 
                 id: socket.id, 
                 socket: socket, 
                 data: finalPlayerData,
-                hp: startingHp // Store HP for when match starts
+                state: newPlayerState
             };
         }
     });
@@ -220,8 +177,14 @@ io.on('connection', (socket) => {
             player.y = data.y;
             player.angle = data.angle;
             
+            // Sync movement + Status flags to opponent
             socket.to(data.roomID).emit('opponentUpdate', { 
-                id: socket.id, x: data.x, y: data.y, angle: data.angle 
+                id: socket.id, 
+                x: data.x, 
+                y: data.y, 
+                angle: data.angle,
+                invisible: player.invisible,
+                shield: player.shield
             });
         }
     });
@@ -231,56 +194,113 @@ io.on('connection', (socket) => {
         const room = rooms[data.roomID];
         if (!room || !room.players[socket.id]) return;
 
-        const player = room.players[socket.id];
-        const weaponKey = player[data.slot]; 
-        const stats = WEAPONS[weaponKey] || WEAPONS['default'];
-
-        // PERK LOGIC: HASTE (Cooldown Reduction)
-        let actualCooldown = stats.cooldown;
-        if (player.perk === 'haste') actualCooldown *= 0.85; // 15% faster
-
+        const p = room.players[socket.id];
         const now = Date.now();
-        if (now - player.lastShootTime < actualCooldown) return;
-        player.lastShootTime = now;
+        const slot = data.slot; // 'primary', 'secondary', 'utility'
 
-        // --- DASH ---
-        if (stats.type === 'dash') {
-            const dashDist = stats.distance;
-            let newX = player.x + Math.cos(player.angle) * dashDist;
-            let newY = player.y + Math.sin(player.angle) * dashDist;
+        // 1. Check Global Cooldown for this slot
+        if (p.cooldowns[slot] > now) return; 
 
-            newX = Math.max(PLAYER_RADIUS, Math.min(MAP_WIDTH - PLAYER_RADIUS, newX));
-            newY = Math.max(PLAYER_RADIUS, Math.min(MAP_HEIGHT - PLAYER_RADIUS, newY));
+        // 2. UTILITY LOGIC
+        if (slot === 'utility') {
+            const utilType = p.utility;
+            let cdTime = 0;
 
-            player.x = newX;
-            player.y = newY;
-            io.to(room.id).emit('opponentUpdate', { id: socket.id, x: player.x, y: player.y, angle: player.angle });
+            if (utilType === 'dash') {
+                // Thruster Dash: +150% speed for 0.5s
+                p.speedMult = DASH_MULTIPLIER;
+                io.to(room.id).emit('applyBuff', { id: socket.id, type: 'speed', val: p.speedMult, duration: DASH_DURATION });
+                
+                // Reset speed after duration
+                setTimeout(() => { 
+                    if(rooms[data.roomID]?.players[socket.id]) p.speedMult = 1.0; 
+                }, DASH_DURATION);
+                
+                cdTime = COOLDOWNS.dash;
+            } 
+            else if (utilType === 'shield') {
+                // Energy Shield: Invulnerable until hit or 10s
+                p.shield = true;
+                // Note: Cooldown does NOT start yet. It starts when shield breaks.
+                cdTime = 0; 
+                
+                // Auto-expire shield if not broken
+                setTimeout(() => {
+                    if(rooms[data.roomID]?.players[socket.id]?.shield) {
+                        rooms[data.roomID].players[socket.id].shield = false;
+                        // Start cooldown NOW
+                        rooms[data.roomID].players[socket.id].cooldowns.utility = Date.now() + COOLDOWNS.shield;
+                        io.to(data.roomID).emit('cooldownUpdate', { id: socket.id, cooldowns: rooms[data.roomID].players[socket.id].cooldowns });
+                    }
+                }, SHIELD_DURATION);
+            }
+            else if (utilType === 'cloak') {
+                // Optical Cloak: Invisible for 5s
+                p.invisible = true;
+                cdTime = COOLDOWNS.cloak;
+                setTimeout(() => { 
+                    if(rooms[data.roomID]?.players[socket.id]) p.invisible = false; 
+                }, CLOAK_DURATION);
+            }
+            else if (utilType === 'repulse') {
+                // Repulse Wave: Push enemies
+                cdTime = COOLDOWNS.repulse;
+                io.to(room.id).emit('visualEffect', { type: 'repulse', x: p.x, y: p.y });
+
+                Object.keys(room.players).forEach(pid => {
+                    if (pid === socket.id) return;
+                    const enemy = room.players[pid];
+                    const dx = enemy.x - p.x;
+                    const dy = enemy.y - p.y;
+                    const dist = Math.sqrt(dx*dx + dy*dy);
+                    
+                    if (dist < 350) { // Range
+                        const angle = Math.atan2(dy, dx);
+                        io.to(pid).emit('forcePush', { angle: angle, force: 40 }); // Strong push
+                    }
+                });
+            }
+
+            // Apply Cooldown (Except for Shield, handled separately)
+            if (utilType !== 'shield') {
+                p.cooldowns.utility = now + cdTime;
+            }
+            
+            // Sync Cooldowns to Client
+            io.to(room.id).emit('cooldownUpdate', { id: socket.id, cooldowns: p.cooldowns });
             return;
         }
 
-        // --- MINES ---
-        if (stats.type === 'mine') {
-            // PERK LOGIC: LETHALITY (Damage Boost)
-            let actualDamage = stats.damage;
-            if (player.perk === 'lethality') actualDamage *= 1.15; 
+        // 3. WEAPON LOGIC
+        // Shooting breaks Invisibility
+        if (p.invisible) {
+            p.invisible = false;
+        }
 
+        const weaponKey = slot === 'primary' ? p.primary : p.secondary;
+        const stats = WEAPONS[weaponKey];
+        
+        // Perk Haste check
+        let actualCD = stats.cooldown;
+        if (p.perk === 'haste') actualCD *= 0.85;
+        p.cooldowns[slot] = now + actualCD;
+
+        // Mine Logic
+        if (stats.type === 'mine') {
+            let actualDamage = stats.damage;
+            if (p.perk === 'lethality') actualDamage *= 1.15;
             room.bullets.push({
                 id: `m_${Date.now()}_${Math.random()}`,
                 ownerId: socket.id,
-                x: player.x,
-                y: player.y,
-                angle: 0,
-                speed: 0,
-                damage: actualDamage,
-                color: stats.color,
-                range: stats.life, 
-                traveled: 0,
-                isMine: true
+                x: p.x, y: p.y, angle: 0, speed: 0,
+                damage: actualDamage, color: stats.color, range: stats.life,
+                traveled: 0, isMine: true
             });
+            io.to(room.id).emit('cooldownUpdate', { id: socket.id, cooldowns: p.cooldowns });
             return;
         }
 
-        // --- GUNS ---
+        // Gun Logic
         const count = stats.count || 1;
         const spread = stats.spread || 0; 
         const spawnDist = PLAYER_RADIUS + 15;
@@ -290,33 +310,42 @@ io.on('connection', (socket) => {
 
         for(let i = 0; i < count; i++) {
             let finalAngle;
-            const step = spread / (count > 1 ? count - 1 : 1);
-            if (count === 1) finalAngle = data.angle; 
+            if (count === 1) finalAngle = data.angle;
             else if (spread >= 6.28) finalAngle = data.angle + (i * (Math.PI * 2 / count));
-            else finalAngle = startAngle + (i * step);
+            else finalAngle = startAngle + (i * (spread / (count - 1)));
 
-            // PERK LOGIC: LETHALITY (Damage Boost)
             let actualDamage = stats.damage;
-            if (player.perk === 'lethality') actualDamage = Math.ceil(actualDamage * 1.15);
+            if (p.perk === 'lethality') actualDamage = Math.ceil(actualDamage * 1.15);
 
             room.bullets.push({
                 id: `b_${Date.now()}_${Math.random()}`,
                 ownerId: socket.id,
-                x: player.x + Math.cos(finalAngle) * spawnDist,
-                y: player.y + Math.sin(finalAngle) * spawnDist,
+                x: p.x + Math.cos(finalAngle) * spawnDist,
+                y: p.y + Math.sin(finalAngle) * spawnDist,
                 angle: finalAngle,
                 speed: stats.speed,
                 damage: actualDamage,
                 color: stats.color,
                 range: stats.range,
-                traveled: 0
+                traveled: 0,
+                pierce: stats.pierce || false,
+                hitList: [],
+                explosive: stats.explosive || false,
+                blastRadius: stats.blastRadius || 0,
+                blastDamage: stats.blastDamage || 0
             });
         }
+        
+        // Update Cooldowns on Client
+        io.to(room.id).emit('cooldownUpdate', { id: socket.id, cooldowns: p.cooldowns });
     });
 
-    // --- GAME END LOGIC ---
-    socket.on('abandonMatch', () => findRoomAndEnd(socket.id, 'draw', null));
+    // --- ABANDON MATCH ---
+    socket.on('abandonMatch', () => {
+        findRoomAndEnd(socket.id, 'draw', null);
+    });
 
+    // --- RECONNECT ---
     socket.on('reconnectRequest', (data) => {
         const { roomID, oldSocketID } = data;
         if (rooms[roomID] && rooms[roomID].players[oldSocketID]) {
@@ -331,34 +360,47 @@ io.on('connection', (socket) => {
 
             socket.join(roomID);
             socket.emit('reconnectSuccess', { roomID, me: pData, players: rooms[roomID].players });
-            setTimeout(() => io.to(roomID).emit('matchResumed', { reconnectedId: socket.id, resumeIn: 3 }), 100);
+            setTimeout(() => {
+                io.to(roomID).emit('matchResumed', { reconnectedId: socket.id, resumeIn: 3 });
+            }, 100);
         } else {
             socket.emit('reconnectFailed');
         }
     });
 
+    // --- DISCONNECT ---
     socket.on('disconnect', () => {
         if (waitingPlayer && waitingPlayer.id === socket.id) {
             waitingPlayer = null;
             return;
         }
+
         let targetRoomId = null;
         for (const rID in rooms) {
-            if (rooms[rID].players[socket.id]) { targetRoomId = rID; break; }
+            if (rooms[rID].players[socket.id]) {
+                targetRoomId = rID;
+                break;
+            }
         }
+
         if (targetRoomId) {
             io.to(targetRoomId).emit('opponentDisconnected', { id: socket.id });
             disconnectTimers[socket.id] = setInterval(() => {
-                if (!rooms[targetRoomId]) { clearInterval(disconnectTimers[socket.id]); return; }
+                if (!rooms[targetRoomId]) {
+                    clearInterval(disconnectTimers[socket.id]); 
+                    return;
+                }
                 const player = rooms[targetRoomId].players[socket.id];
                 if (player) {
-                    player.hp -= BLEED_DAMAGE;
+                    player.hp -= 5; // Bleed damage
                     io.to(targetRoomId).emit('playerDamage', { id: socket.id, hp: player.hp });
                     if (player.hp <= 0) {
                         const winnerId = Object.keys(rooms[targetRoomId].players).find(id => id !== socket.id);
                         endGame(targetRoomId, "opponent_disconnect", winnerId, socket.id);
                     }
-                } else clearInterval(disconnectTimers[socket.id]);
+                } else {
+                    clearInterval(disconnectTimers[socket.id]);
+                }
             }, 1000);
         }
     });
@@ -367,41 +409,111 @@ io.on('connection', (socket) => {
 });
 
 // ==================================================================
-// 5. SERVER LOOP
+// 6. GAME LOOP (PHYSICS & REGEN)
 // ==================================================================
 setInterval(() => {
-    for (const roomId in rooms) updateRoom(rooms[roomId]);
+    for (const roomId in rooms) {
+        updateRoom(rooms[roomId]);
+    }
 }, TICK_RATE);
 
 function updateRoom(room) {
-    if (!room.bullets || room.bullets.length === 0) return;
-    let bulletsToRemove = [];
+    const now = Date.now();
     let stateChanged = false;
+    
+    // 1. REGEN & BUFF MANAGEMENT
+    for (const pid in room.players) {
+        const p = room.players[pid];
+        
+        // Regen Logic (2 HP/sec if no damage for 5s)
+        if (p.hp < p.maxHp && p.hp > 0) {
+            if (now - p.lastDamageTime > REGEN_DELAY) {
+                p.hp = Math.min(p.maxHp, p.hp + (REGEN_RATE / 60)); // Add per tick
+            }
+        }
+
+        // Expire Buffs just in case (though setTimeout handles most)
+        if (p.invisible && p.cooldowns.utility < now && p.utility === 'cloak') {
+             // Redundant safeguard
+        }
+    }
+
+    // 2. BULLET LOGIC
+    if (!room.bullets || room.bullets.length === 0) return;
+
+    let bulletsToRemove = [];
 
     room.bullets.forEach(b => {
+        // Move Projectiles
         if (!b.isMine) {
             b.x += Math.cos(b.angle) * b.speed;
             b.y += Math.sin(b.angle) * b.speed;
             b.traveled += b.speed;
         } else {
-            b.traveled += 16; // Mine lifetime ticker
+            b.traveled += 16; 
         }
 
+        // Check Boundaries / Lifetime
         if (b.traveled > b.range || b.x < 0 || b.x > MAP_WIDTH || b.y < 0 || b.y > MAP_HEIGHT) {
             bulletsToRemove.push(b.id);
         }
 
+        // Collision Detection
         for (const playerId in room.players) {
-            if (playerId === b.ownerId && b.traveled < 500) continue; // Safe time for mines
             const player = room.players[playerId];
+
+            if (playerId === b.ownerId && (!b.isMine || b.traveled < 500)) continue;
+            if (b.pierce && b.hitList.includes(playerId)) continue;
+
             if (getDistance(b, player) < PLAYER_RADIUS + 6) { 
-                player.hp -= b.damage;
-                bulletsToRemove.push(b.id);
-                stateChanged = true;
-                io.to(room.id).emit('playerDamage', { id: playerId, hp: player.hp });
-                if (player.hp <= 0) {
-                    endGame(room.id, "kill", b.ownerId, playerId);
-                    return; 
+                
+                // --- HIT LOGIC ---
+                // Check Shield
+                if (player.shield) {
+                    // Shield Blocks Hit!
+                    player.shield = false; // Break Shield
+                    
+                    // Start Cooldown NOW
+                    player.cooldowns.utility = Date.now() + COOLDOWNS.shield;
+                    
+                    io.to(room.id).emit('visualEffect', { type: 'shieldBreak', x: player.x, y: player.y });
+                    io.to(room.id).emit('cooldownUpdate', { id: playerId, cooldowns: player.cooldowns });
+                    io.to(room.id).emit('opponentUpdate', { id: playerId, x: player.x, y: player.y, angle: player.angle, shield: false });
+                    
+                    bulletsToRemove.push(b.id); // Bullet destroyed on shield
+                    break;
+                } 
+                else {
+                    // Direct Damage
+                    player.hp -= b.damage;
+                    player.lastDamageTime = Date.now(); // Reset Regen Timer
+
+                    // Handle Explosive
+                    if (b.explosive) {
+                        for(const targetId in room.players) {
+                             if(targetId === b.ownerId) continue; 
+                             const target = room.players[targetId];
+                             const dist = getDistance({x: b.x, y: b.y}, target);
+                             if (dist < b.blastRadius) {
+                                 target.hp -= b.blastDamage; 
+                                 target.lastDamageTime = Date.now();
+                             }
+                        }
+                    }
+                    
+                    io.to(room.id).emit('playerDamage', { id: playerId, hp: player.hp });
+
+                    if (player.hp <= 0) {
+                        endGame(room.id, "kill", b.ownerId, playerId);
+                        return; 
+                    }
+
+                    if (b.pierce) {
+                        b.hitList.push(playerId);
+                    } else {
+                        bulletsToRemove.push(b.id);
+                        break; 
+                    }
                 }
             }
         }
@@ -411,7 +523,10 @@ function updateRoom(room) {
         room.bullets = room.bullets.filter(b => !bulletsToRemove.includes(b.id));
         stateChanged = true;
     }
-    if (stateChanged || room.bullets.length > 0) io.to(room.id).emit('projectilesUpdate', room.bullets);
+
+    if (stateChanged || room.bullets.length > 0) {
+        io.to(room.id).emit('projectilesUpdate', room.bullets);
+    }
 }
 
 function findRoomAndEnd(socketId, reason, winnerId) {
@@ -425,11 +540,23 @@ function findRoomAndEnd(socketId, reason, winnerId) {
 
 function endGame(roomId, reason, winnerId, loserId) {
     if (rooms[roomId]) {
+        // Clear timers
         Object.keys(rooms[roomId].players).forEach(pid => {
-            if (disconnectTimers[pid]) { clearInterval(disconnectTimers[pid]); delete disconnectTimers[pid]; }
+            if (disconnectTimers[pid]) {
+                clearInterval(disconnectTimers[pid]);
+                delete disconnectTimers[pid];
+            }
         });
-        if (!loserId && winnerId) loserId = Object.keys(rooms[roomId].players).find(id => id !== winnerId);
-        io.to(roomId).emit('gameOver', { winner: reason, winnerId: winnerId, loserId: loserId });
+
+        if (!loserId && winnerId) {
+            loserId = Object.keys(rooms[roomId].players).find(id => id !== winnerId);
+        }
+
+        io.to(roomId).emit('gameOver', { 
+            winner: reason, 
+            winnerId: winnerId,
+            loserId: loserId 
+        });
         delete rooms[roomId];
     }
 }
