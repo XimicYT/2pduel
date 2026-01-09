@@ -34,7 +34,7 @@ const DASH_DURATION = 500;
 const DASH_MULTIPLIER = 2.5;   
 const CLOAK_DURATION = 5000;
 const SHIELD_DURATION = 10000;
-const REPULSE_DURATION = 1500; // How long "Pinball Mode" lasts
+const REPULSE_DURATION = 700; // How long "Pinball Mode" lasts
 
 const COOLDOWNS = {
     rifle: 200,    
@@ -453,11 +453,11 @@ function updateRoom(room) {
 
             // Determine Friction
             let friction = 0.92; // Standard Floor friction
-            if (isPinball) friction = 1.0; // ZERO Friction (slides forever)
+            if (isPinball) friction = 0.9   ; // ZERO Friction (slides forever)
 
             // Determine Wall Bounce
             let wallBounce = -0.5; // Standard 'dull' bounce
-            if (isPinball) wallBounce = -1.0; // PERFECT BOUNCE (Keeps all speed)
+            if (isPinball) wallBounce = -0.9; // PERFECT BOUNCE (Keeps all speed)
 
             // Adaptive Network Rate: If flying fast, force updates
             if (Math.abs(p.vx) > 2 || Math.abs(p.vy) > 2) {
