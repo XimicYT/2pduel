@@ -14,39 +14,46 @@ const io = new Server(server, {
 
 const PORT = process.env.PORT || 3000;
 
-// 2. GAME CONSTANTS & STATE
+// 2. GAME CONSTANTS
 const TICK_RATE = 1000 / 60; // 60 FPS Server Loop
 const MAP_WIDTH = 1920;
 const MAP_HEIGHT = 1080;
-
-// Combat Stats
 const MAX_HP = 100;
-const BLEED_DAMAGE = 5; // Per second (disconnect)
-const BULLET_SPEED = 18;
-const BULLET_RADIUS = 6;
+const BLEED_DAMAGE = 5; // Damage per second when disconnected
 const PLAYER_RADIUS = 30;
-const BULLET_DAMAGE = 10;
 
+// 3. WEAPON DATABASE (Server Authority)
+const WEAPONS = {
+    // Primary
+    'rifle':    { damage: 12, speed: 20, cooldown: 150,  range: 1000, color: '#ffff00' },
+    'sniper':   { damage: 45, speed: 35, cooldown: 1200, range: 2000, color: '#ff0000' },
+    'shotgun':  { damage: 8,  speed: 18, cooldown: 800,  range: 400,  color: '#ffa500', count: 5, spread: 0.2 },
+    // Secondary
+    'pistol':   { damage: 10, speed: 18, cooldown: 300,  range: 800,  color: '#cccccc' },
+    'revolver': { damage: 25, speed: 22, cooldown: 600,  range: 900,  color: '#aa6600' },
+    // Utility
+    'grenade':  { damage: 60, speed: 10, cooldown: 3000, range: 600,  color: '#00ff00', type: 'explosive' }
+};
+
+// 4. STATE MANAGEMENT
 let rooms = {}; 
 let waitingPlayer = null; 
 let disconnectTimers = {}; 
 
-// 3. HELPER FUNCTIONS
-
-// Distance formula
+// Helper: Distance Formula
 function getDistance(a, b) {
     return Math.sqrt(Math.pow(b.x - a.x, 2) + Math.pow(b.y - a.y, 2));
 }
 
-// 4. SOCKET LOGIC
+// 5. SOCKET LOGIC
 io.on('connection', (socket) => {
     console.log(`User Connected: ${socket.id}`);
 
     // --- MATCHMAKING ---
     socket.on('joinQueue', (playerData) => {
+        // Sanitize Name
         const cleanName = (playerData.username || "Agent").substring(0, 12).replace(/[^a-zA-Z0-9 _-]/g, "");
-        playerData.username = cleanName;
-
+        
         // Uniqueness Check
         let nameTaken = false;
         if (waitingPlayer && waitingPlayer.data.username === cleanName) nameTaken = true;
@@ -59,6 +66,7 @@ io.on('connection', (socket) => {
                         break;
                     }
                 }
+                if (nameTaken) break;
             }
         }
 
@@ -66,6 +74,15 @@ io.on('connection', (socket) => {
             socket.emit('queueError', 'NAME ALREADY IN USE. CHOOSE ANOTHER.');
             return;
         }
+
+        // Prepare Player Object with Loadout
+        const finalPlayerData = {
+            username: cleanName,
+            classType: playerData.classType || 'assault',
+            primary: playerData.primary || 'rifle',
+            secondary: playerData.secondary || 'pistol',
+            utility: playerData.utility || 'grenade'
+        };
 
         if (waitingPlayer) {
             // Create Match
@@ -75,25 +92,19 @@ io.on('connection', (socket) => {
 
             rooms[roomID] = {
                 id: roomID,
-                // Initialize Combat Arrays
                 bullets: [],
-                objects: [], // Placeholder for future obstacles
                 players: {
                     [p1ID]: { 
                         ...waitingPlayer.data, 
-                        hp: MAX_HP, 
-                        maxHp: MAX_HP, 
-                        x: 100, 
-                        y: 540, 
-                        angle: 0 
+                        hp: MAX_HP, maxHp: MAX_HP, 
+                        x: 100, y: 540, angle: 0,
+                        lastShootTime: 0 
                     },
                     [p2ID]: { 
-                        ...playerData, 
-                        hp: MAX_HP, 
-                        maxHp: MAX_HP, 
-                        x: 1820, 
-                        y: 540, 
-                        angle: Math.PI 
+                        ...finalPlayerData, 
+                        hp: MAX_HP, maxHp: MAX_HP, 
+                        x: 1820, y: 540, angle: Math.PI,
+                        lastShootTime: 0
                     }
                 }
             };
@@ -104,11 +115,11 @@ io.on('connection', (socket) => {
             io.to(roomID).emit('matchFound', { roomID, players: rooms[roomID].players });
             waitingPlayer = null; 
         } else {
-            waitingPlayer = { id: socket.id, socket: socket, data: playerData };
+            waitingPlayer = { id: socket.id, socket: socket, data: finalPlayerData };
         }
     });
 
-    // --- PLAYER MOVEMENT ---
+    // --- MOVEMENT ---
     socket.on('playerUpdate', (data) => {
         if (rooms[data.roomID] && rooms[data.roomID].players[socket.id]) {
             const player = rooms[data.roomID].players[socket.id];
@@ -116,7 +127,7 @@ io.on('connection', (socket) => {
             player.y = data.y;
             player.angle = data.angle;
             
-            // Relay to opponent (Client prediction is smoother for movement)
+            // Relay to opponent for interpolation
             socket.to(data.roomID).emit('opponentUpdate', { 
                 id: socket.id, 
                 x: data.x, 
@@ -126,27 +137,44 @@ io.on('connection', (socket) => {
         }
     });
 
-    // --- PLAYER SHOOTING (New) ---
+    // --- SHOOTING ---
     socket.on('playerShoot', (data) => {
         const room = rooms[data.roomID];
-        if (room && room.players[socket.id]) {
-            const player = room.players[socket.id];
+        if (!room || !room.players[socket.id]) return;
 
-            // Calculate spawn position (tip of the gun)
-            // Offset slightly so you don't shoot yourself
-            const spawnDist = PLAYER_RADIUS + 10;
-            const bx = player.x + Math.cos(data.angle) * spawnDist;
-            const by = player.y + Math.sin(data.angle) * spawnDist;
+        const player = room.players[socket.id];
+        
+        // 1. Identify Weapon from Inventory
+        const weaponKey = player[data.slot]; // data.slot is 'primary', 'secondary', etc.
+        const stats = WEAPONS[weaponKey];
 
-            // Add bullet to Server State
+        if (!stats) return;
+
+        // 2. Cooldown Check
+        const now = Date.now();
+        if (now - player.lastShootTime < stats.cooldown) return;
+        player.lastShootTime = now;
+
+        // 3. Create Bullet(s)
+        const spawnDist = PLAYER_RADIUS + 10;
+        const count = stats.count || 1;
+        const spread = stats.spread || 0;
+
+        for(let i=0; i<count; i++) {
+            const angleOffset = (Math.random() - 0.5) * spread;
+            const finalAngle = data.angle + angleOffset;
+
             room.bullets.push({
                 id: `b_${Date.now()}_${Math.random()}`,
                 ownerId: socket.id,
-                x: bx,
-                y: by,
-                angle: data.angle,
-                speed: BULLET_SPEED,
-                damage: BULLET_DAMAGE
+                x: player.x + Math.cos(finalAngle) * spawnDist,
+                y: player.y + Math.sin(finalAngle) * spawnDist,
+                angle: finalAngle,
+                speed: stats.speed,
+                damage: stats.damage,
+                color: stats.color,
+                range: stats.range,
+                traveled: 0
             });
         }
     });
@@ -162,16 +190,7 @@ io.on('connection', (socket) => {
         }
 
         if (targetRoomId) {
-            // Stop bleeding timers
-            Object.keys(disconnectTimers).forEach(id => {
-                if (rooms[targetRoomId].players[id]) {
-                    clearInterval(disconnectTimers[id]);
-                    delete disconnectTimers[id];
-                }
-            });
-
-            io.to(targetRoomId).emit('gameOver', { winner: 'draw' });
-            delete rooms[targetRoomId];
+            endGame(targetRoomId, 'draw', null);
         }
     });
 
@@ -225,11 +244,11 @@ io.on('connection', (socket) => {
                 const player = rooms[targetRoomId].players[socket.id];
                 if (player) {
                     player.hp -= BLEED_DAMAGE;
-                    // Emit damage update
                     io.to(targetRoomId).emit('playerDamage', { id: socket.id, hp: player.hp });
 
                     if (player.hp <= 0) {
-                        endGame(targetRoomId, "opponent_disconnect", socket.id);
+                        const winnerId = Object.keys(rooms[targetRoomId].players).find(id => id !== socket.id);
+                        endGame(targetRoomId, "opponent_disconnect", winnerId);
                     }
                 } else {
                     clearInterval(disconnectTimers[socket.id]);
@@ -241,7 +260,7 @@ io.on('connection', (socket) => {
     socket.on('ping', (cb) => { if(typeof cb === 'function') cb(); });
 });
 
-// 5. SERVER GAME LOOP (The Combat Engine)
+// 6. GAME LOOP
 setInterval(() => {
     for (const roomId in rooms) {
         updateRoom(rooms[roomId]);
@@ -251,65 +270,55 @@ setInterval(() => {
 function updateRoom(room) {
     if (!room.bullets || room.bullets.length === 0) return;
 
-    // A list of bullet IDs to remove
     let bulletsToRemove = [];
     let stateChanged = false;
 
-    // 1. Move Bullets
+    // Move Bullets
     room.bullets.forEach(b => {
         b.x += Math.cos(b.angle) * b.speed;
         b.y += Math.sin(b.angle) * b.speed;
+        b.traveled += b.speed;
 
-        // Check Boundaries
-        if (b.x < 0 || b.x > MAP_WIDTH || b.y < 0 || b.y > MAP_HEIGHT) {
+        // Boundaries & Range
+        if (b.traveled > b.range || b.x < 0 || b.x > MAP_WIDTH || b.y < 0 || b.y > MAP_HEIGHT) {
             bulletsToRemove.push(b.id);
         }
 
-        // Check Collisions
+        // Collision
         for (const playerId in room.players) {
-            // Don't hit yourself
             if (playerId === b.ownerId) continue;
 
             const player = room.players[playerId];
-            const dist = getDistance(b, player);
-
-            if (dist < PLAYER_RADIUS + BULLET_RADIUS) {
-                // HIT CONFIRMED
+            if (getDistance(b, player) < PLAYER_RADIUS + 6) { // + Bullet Radius
                 player.hp -= b.damage;
                 bulletsToRemove.push(b.id);
                 stateChanged = true;
 
-                // Notify clients of damage
                 io.to(room.id).emit('playerDamage', { id: playerId, hp: player.hp });
 
-                // Check Death
                 if (player.hp <= 0) {
-                    // The winner is the owner of the bullet
-                    endGame(room.id, "kill", b.ownerId); 
-                    return; // Stop updating this room, it's over
+                    endGame(room.id, "kill", b.ownerId);
+                    return; 
                 }
             }
         }
     });
 
-    // 2. Cleanup Bullets
+    // Cleanup
     if (bulletsToRemove.length > 0) {
         room.bullets = room.bullets.filter(b => !bulletsToRemove.includes(b.id));
         stateChanged = true;
     }
 
-    // 3. Sync Projectiles to Clients
-    // We send this every tick (60hz) or whenever it changes. 
-    // For smooth bullets, clients need regular updates.
+    // Sync
     if (stateChanged || room.bullets.length > 0) {
         io.to(room.id).emit('projectilesUpdate', room.bullets);
     }
 }
 
-// Helper to end game cleanly
-function endGame(roomId, reason, winnerOrLoserId) {
-    // Stop all bleed timers for this room
+function endGame(roomId, reason, winnerId) {
     if (rooms[roomId]) {
+        // Stop timers
         Object.keys(rooms[roomId].players).forEach(pid => {
             if (disconnectTimers[pid]) {
                 clearInterval(disconnectTimers[pid]);
@@ -317,17 +326,7 @@ function endGame(roomId, reason, winnerOrLoserId) {
             }
         });
 
-        // Determine winner
-        let winnerId = null;
-        if (reason === "kill") {
-            winnerId = winnerOrLoserId; // The killer won
-        } else if (reason === "opponent_disconnect") {
-            // The loser is passed in, find the other guy
-            winnerId = Object.keys(rooms[roomId].players).find(id => id !== winnerOrLoserId);
-        }
-
         io.to(roomId).emit('gameOver', { winner: reason, winnerId: winnerId });
-        console.log(`Game Over in ${roomId}. Reason: ${reason}`);
         delete rooms[roomId];
     }
 }
