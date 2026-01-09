@@ -1,203 +1,181 @@
 const express = require('express');
-const app = express();
 const http = require('http');
-const server = http.createServer(app);
-const { Server } = require("socket.io");
+const { Server } = require('socket.io');
+const cors = require('cors');
 
-// Enable CORS
+const app = express();
+app.use(cors());
+
+const server = http.createServer(app);
 const io = new Server(server, {
-    cors: {
-        origin: "*", 
-        methods: ["GET", "POST"]
-    }
+    cors: { origin: "*", methods: ["GET", "POST"] }
 });
 
-app.use(express.static('public'));
+const PORT = process.env.PORT || 3000;
 
-// GAME STATE
-const rooms = {};
-let queue = [];
-const disconnectTimers = {}; // Stores the "Bleed Out" intervals
+let rooms = {}; 
+let waitingPlayer = null; 
+let disconnectTimers = {}; 
+
+const MAX_HP = 100;
+const BLEED_DAMAGE = 5; 
 
 io.on('connection', (socket) => {
-    console.log(`[CONNECT] New Socket: ${socket.id}`);
+    console.log(`User Connected: ${socket.id}`);
 
-    // ==========================================
-    // 1. RECONNECTION HANDLER
-    // ==========================================
-    socket.on('reconnectRequest', ({ roomID, oldSocketID }) => {
-        console.log(`[RECONNECT] Attempt: ${oldSocketID} -> ${socket.id} (Room: ${roomID})`);
-        
-        const room = rooms[roomID];
-        
-        // Validation: Room must exist, and Old Player data must still be there
-        if (room && room.players[oldSocketID]) {
-            console.log(`[RECONNECT] SUCCESS! Restoring state.`);
-            
-            // A. Stop the Bleeding
-            if (disconnectTimers[oldSocketID]) {
-                clearInterval(disconnectTimers[oldSocketID]);
-                delete disconnectTimers[oldSocketID];
-                console.log(`[TIMER] Bleed timer cancelled for ${oldSocketID}`);
-            }
-
-            // B. Swap Data to New Socket
-            room.players[socket.id] = room.players[oldSocketID];
-            room.players[socket.id].id = socket.id; // Update internal ID
-            delete room.players[oldSocketID];       // Remove old key
-
-            // C. Re-join Socket.io Room
-            socket.join(roomID);
-            
-            // D. Restore State to Returning Player
-            socket.emit('reconnectSuccess', { 
-                roomID, 
-                players: room.players,
-                me: room.players[socket.id] 
-            });
-
-            // E. Sync Both Players & Start Countdown
-            io.to(roomID).emit('playerReconnected', { 
-                id: socket.id, 
-                oldId: oldSocketID,
-                resumeIn: 3 // Seconds to wait
-            });
-
-        } else {
-            console.log(`[RECONNECT] FAILED. Room or player not found.`);
-            socket.emit('reconnectFailed');
-        }
-    });
-
-    // ==========================================
-    // 2. MATCHMAKING
-    // ==========================================
+    // --- MATCHMAKING ---
     socket.on('joinQueue', (playerData) => {
-        // Remove from queue if already there
-        queue = queue.filter(p => p.id !== socket.id);
-        
-        console.log(`[QUEUE] User ${playerData.username} joined.`);
-        queue.push({ id: socket.id, data: playerData });
+        const cleanName = (playerData.username || "Agent").substring(0, 12).replace(/[^a-zA-Z0-9 _-]/g, "");
+        playerData.username = cleanName;
 
-        if (queue.length >= 2) {
-            const p1 = queue.shift();
-            const p2 = queue.shift();
+        let nameTaken = false;
+        if (waitingPlayer && waitingPlayer.data.username === cleanName) nameTaken = true;
+        if (!nameTaken) {
+            for (const rID in rooms) {
+                const players = rooms[rID].players;
+                for (const pID in players) {
+                    if (players[pID].username === cleanName) {
+                        nameTaken = true;
+                        break;
+                    }
+                }
+                if (nameTaken) break;
+            }
+        }
+
+        if (nameTaken) {
+            socket.emit('queueError', 'NAME ALREADY IN USE. CHOOSE ANOTHER.');
+            return;
+        }
+
+        if (waitingPlayer) {
             const roomID = `room_${Date.now()}`;
-            
-            console.log(`[MATCH] Creating Room ${roomID}`);
+            const p1ID = waitingPlayer.id;
+            const p2ID = socket.id;
 
             rooms[roomID] = {
                 id: roomID,
                 players: {
-                    [p1.id]: { 
-                        id: p1.id, 
-                        username: p1.data.username,
-                        classType: p1.data.classType,
-                        hp: 100, maxHp: 100, 
-                        x: 100, y: 300, 
-                        angle: 0,
-                        ...p1.data 
-                    },
-                    [p2.id]: { 
-                        id: p2.id, 
-                        username: p2.data.username,
-                        classType: p2.data.classType,
-                        hp: 100, maxHp: 100,
-                        x: 1800, y: 300, 
-                        angle: Math.PI, // Facing left
-                        ...p2.data 
-                    }
+                    [p1ID]: { ...waitingPlayer.data, hp: MAX_HP, maxHp: MAX_HP, x: 100, y: 540, angle: 0 },
+                    [p2ID]: { ...playerData, hp: MAX_HP, maxHp: MAX_HP, x: 1820, y: 540, angle: Math.PI }
                 }
             };
 
-            // Join Rooms
-            const s1 = io.sockets.sockets.get(p1.id);
-            const s2 = io.sockets.sockets.get(p2.id);
-            if(s1) s1.join(roomID);
-            if(s2) s2.join(roomID);
+            waitingPlayer.socket.join(roomID);
+            socket.join(roomID);
 
-            // Notify Players
-            io.to(p1.id).emit('matchFound', { roomID, players: rooms[roomID].players });
-            io.to(p2.id).emit('matchFound', { roomID, players: rooms[roomID].players });
+            io.to(roomID).emit('matchFound', { roomID, players: rooms[roomID].players });
+            waitingPlayer = null; 
+        } else {
+            waitingPlayer = { id: socket.id, socket: socket, data: playerData };
         }
     });
 
-    // ==========================================
-    // 3. GAMEPLAY
-    // ==========================================
+    // --- MOVEMENT ---
     socket.on('playerUpdate', (data) => {
         if (rooms[data.roomID] && rooms[data.roomID].players[socket.id]) {
-            const p = rooms[data.roomID].players[socket.id];
-            p.x = data.x;
-            p.y = data.y;
-            p.angle = data.angle;
-            socket.to(data.roomID).emit('opponentUpdate', p);
+            const player = rooms[data.roomID].players[socket.id];
+            player.x = data.x;
+            player.y = data.y;
+            player.angle = data.angle;
+            socket.to(data.roomID).emit('opponentUpdate', { id: socket.id, x: data.x, y: data.y, angle: data.angle });
         }
     });
 
-    socket.on('ping', (cb) => { if(typeof cb === 'function') cb(); });
+    // --- RECONNECT ---
+    socket.on('reconnectRequest', (data) => {
+        const { roomID, oldSocketID } = data;
+        if (rooms[roomID] && rooms[roomID].players[oldSocketID]) {
+            if (disconnectTimers[oldSocketID]) {
+                clearInterval(disconnectTimers[oldSocketID]);
+                delete disconnectTimers[oldSocketID];
+            }
 
-    // ==========================================
-    // 4. DISCONNECT HANDLER
-    // ==========================================
-    socket.on('disconnect', () => {
-        console.log(`[DISCONNECT] Socket: ${socket.id}`);
-        
-        // Find the Room they were in
+            const pData = rooms[roomID].players[oldSocketID];
+            delete rooms[roomID].players[oldSocketID];
+            rooms[roomID].players[socket.id] = pData;
+
+            socket.join(roomID);
+            socket.emit('reconnectSuccess', { roomID, me: pData, players: rooms[roomID].players });
+            socket.to(roomID).emit('playerReconnected', { oldId: oldSocketID, id: socket.id, resumeIn: 3 });
+        } else {
+            socket.emit('reconnectFailed');
+        }
+    });
+
+    // --- ABANDON MATCH (New) ---
+    socket.on('abandonMatch', () => {
+        // Find the room this player is in
         let targetRoomId = null;
-        for (const rId in rooms) {
-            if (rooms[rId].players[socket.id]) {
-                targetRoomId = rId;
+        for (const rID in rooms) {
+            if (rooms[rID].players[socket.id]) {
+                targetRoomId = rID;
                 break;
             }
         }
 
         if (targetRoomId) {
-            const room = rooms[targetRoomId];
-            console.log(`[GAME] Player left active match in ${targetRoomId}`);
+            // Stop any active timers for this room (in case both abandoned?)
+            Object.keys(disconnectTimers).forEach(id => {
+                if (rooms[targetRoomId].players[id]) {
+                    clearInterval(disconnectTimers[id]);
+                    delete disconnectTimers[id];
+                }
+            });
 
-            // Notify opponent immediately
+            // Declare Draw
+            io.to(targetRoomId).emit('gameOver', { winner: 'draw' });
+            
+            // Delete Room
+            delete rooms[targetRoomId];
+        }
+    });
+
+    // --- DISCONNECT ---
+    socket.on('disconnect', () => {
+        if (waitingPlayer && waitingPlayer.id === socket.id) {
+            waitingPlayer = null;
+            return;
+        }
+
+        let targetRoomId = null;
+        for (const rID in rooms) {
+            if (rooms[rID].players[socket.id]) {
+                targetRoomId = rID;
+                break;
+            }
+        }
+
+        if (targetRoomId) {
             io.to(targetRoomId).emit('opponentDisconnected', { id: socket.id });
 
-            // START BLEED OUT TIMER
-            const playerState = room.players[socket.id];
-            const damagePerTick = Math.ceil((playerState.maxHp || 100) * 0.05); // 5% per second
-
             disconnectTimers[socket.id] = setInterval(() => {
-                // Safety check: ensure room still exists
-                if (!rooms[targetRoomId] || !rooms[targetRoomId].players[socket.id]) {
+                if (!rooms[targetRoomId]) {
                     clearInterval(disconnectTimers[socket.id]);
+                    delete disconnectTimers[socket.id];
                     return;
                 }
 
-                playerState.hp -= damagePerTick;
-                console.log(`[BLEED] ${socket.id} HP: ${playerState.hp}`);
+                const player = rooms[targetRoomId].players[socket.id];
+                if (player) {
+                    player.hp -= BLEED_DAMAGE;
+                    io.to(targetRoomId).emit('playerDamage', { id: socket.id, hp: player.hp });
 
-                // Send HP Update
-                io.to(targetRoomId).emit('playerDamage', { 
-                    id: socket.id, 
-                    hp: playerState.hp 
-                });
-
-                // Check Death
-                if (playerState.hp <= 0) {
+                    if (player.hp <= 0) {
+                        clearInterval(disconnectTimers[socket.id]);
+                        delete disconnectTimers[socket.id];
+                        const winnerId = Object.keys(rooms[targetRoomId].players).find(id => id !== socket.id);
+                        io.to(targetRoomId).emit('gameOver', { winner: "opponent_disconnect", winnerId });
+                        delete rooms[targetRoomId];
+                    }
+                } else {
                     clearInterval(disconnectTimers[socket.id]);
-                    delete disconnectTimers[socket.id];
-                    console.log(`[GAME OVER] Player bled out.`);
-                    
-                    io.to(targetRoomId).emit('gameOver', { winner: 'opponent_disconnect' });
-                    delete rooms[targetRoomId];
                 }
-            }, 1000); 
-
-        } else {
-            // Just remove from queue
-            queue = queue.filter(p => p.id !== socket.id);
+            }, 1000);
         }
     });
+    
+    socket.on('ping', (cb) => { if(typeof cb === 'function') cb(); });
 });
 
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-});
+server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
