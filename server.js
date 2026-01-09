@@ -453,11 +453,11 @@ function updateRoom(room) {
 
             // Determine Friction
             let friction = 0.92; // Standard Floor friction
-            if (isPinball) friction = 0.9   ; // ZERO Friction (slides forever)
+            if (isPinball) friction = 1.0; // ZERO Friction (slides forever)
 
             // Determine Wall Bounce
             let wallBounce = -0.5; // Standard 'dull' bounce
-            if (isPinball) wallBounce = -0.9; // PERFECT BOUNCE (Keeps all speed)
+            if (isPinball) wallBounce = -1.0; // PERFECT BOUNCE (Keeps all speed)
 
             // Adaptive Network Rate: If flying fast, force updates
             if (Math.abs(p.vx) > 2 || Math.abs(p.vy) > 2) {
