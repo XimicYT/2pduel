@@ -9,6 +9,9 @@ const cors = require("cors");
 const app = express();
 app.use(cors());
 
+// Optional: Serve static files if hosting from here
+app.use(express.static("public"));
+
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: { origin: "*", methods: ["GET", "POST"] },
@@ -35,8 +38,8 @@ const SHIELD_DURATION = 10000;
 const REPULSE_DURATION = 700; // How long "Pinball Mode" lasts
 
 const COOLDOWNS = {
-  rifle: 200,
-  pistol: 400,
+  rifle: 200, // Fallback
+  pistol: 400, // Fallback
   dash: 3000,
   shield: 12000,
   cloak: 8000,
@@ -141,7 +144,7 @@ const WEAPONS = {
     desc: "Proximity Mine",
   },
 
-  // --- UTILITIES ---
+  // --- UTILITIES (Reference) ---
   repulse: { cooldown: COOLDOWNS.repulse },
   dash: { cooldown: COOLDOWNS.dash },
   shield: { cooldown: COOLDOWNS.shield },
@@ -152,8 +155,8 @@ const WEAPONS = {
 // 4. STATE MANAGEMENT
 // ==================================================================
 let rooms = {};
-let waitingPlayers = []; // Corrected: waitingPlayers was declared as waitingPlayer (singular) in your snippet, switched to array
-let disconnectTimers = {};
+let waitingPlayers = []; 
+let disconnectTimers = {}; // Stores setTimeout IDs
 
 function getDistance(a, b) {
   return Math.sqrt(Math.pow(b.x - a.x, 2) + Math.pow(b.y - a.y, 2));
@@ -166,25 +169,140 @@ io.on("connection", (socket) => {
   console.log(`User Connected: ${socket.id}`);
 
   // ===============================================
-  //  JOIN QUEUE & REJOIN LOGIC (FIXED)
+  //  JOIN QUEUE
   // ===============================================
   socket.on("joinQueue", (data) => {
     
-    // --- 1. HANDLE REJOIN (Player has a token) ---
+    // 1. SAVE USER DATA (Important Fix: Capture Perks/Weapons)
+    // If we don't do this, players spawn with defaults
+    if (data) {
+        socket.userData = {
+            username: data.username ? data.username.substring(0, 15) : "Agent",
+            perk: data.perk || "vitality",
+            primary: data.primary || "pulse",
+            secondary: data.secondary || "pistol",
+            utility: data.utility || "dash"
+        };
+    }
+
+    // 2. CHECK FOR REJOIN TOKEN
     if (data && data.token) {
       const token = data.token;
-      console.log(`[REJOIN] Player ${socket.id} trying to rejoin with token: ${token}`);
-
-      let foundRoomId = null;
-      let oldSocketId = null;
-
-      // Find room containing the token
+      // Search all rooms
       for (const rID in rooms) {
         const room = rooms[rID];
         const pID = Object.keys(room.players).find(
           (id) => room.players[id].matchToken === token
         );
         
+        if (pID) {
+          // Rejoin Logic specifically handled in 'rejoinGame' or here.
+          // Since client might emit 'rejoinGame' separately, we can let that handle it,
+          // OR handle it here if the client sends token in joinQueue.
+          // For safety, let's trigger the rejoin logic here immediately.
+          socket.emit("matchFound", {
+             rejoinParams: { token: token } // Client will see this and call rejoinGame?
+             // Or we just handle it directly:
+          });
+          // Better approach: If they have a token, we process it as a rejoin immediately
+          // reusing logic similar to rejoinGame below.
+          handleRejoin(socket, token);
+          return;
+        }
+      }
+    }
+
+    // 3. NORMAL QUEUE LOGIC
+    // Check if already in queue
+    if (waitingPlayers.some(s => s.id === socket.id)) return;
+
+    console.log(`[QUEUE] Player ${socket.id} joined queue`);
+    waitingPlayers.push(socket);
+
+    // Clean queue
+    waitingPlayers = waitingPlayers.filter(s => s.connected);
+
+    if (waitingPlayers.length >= 2) {
+      const p1 = waitingPlayers.shift();
+      const p2 = waitingPlayers.shift();
+
+      if (!p1.connected || !p2.connected) {
+         if (p1.connected) waitingPlayers.unshift(p1);
+         if (p2.connected) waitingPlayers.unshift(p2);
+         return;
+      }
+
+      const roomId = `room_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      const token1 = `token_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      const token2 = `token_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
+      // Setup Player Objects using Saved Data
+      const p1Data = p1.userData || { username: "P1", perk: "vitality", primary: "pulse", secondary: "pistol", utility: "dash" };
+      const p2Data = p2.userData || { username: "P2", perk: "vitality", primary: "pulse", secondary: "pistol", utility: "dash" };
+
+      rooms[roomId] = {
+        id: roomId,
+        gameStartTime: Date.now() + COUNTDOWN_TIME,
+        players: {
+          [p1.id]: { 
+            id: p1.id, x: 100, y: MAP_HEIGHT/2, 
+            hp: 100, maxHp: 100, color: "red", score: 0, connected: true, matchToken: token1,
+            cooldowns: {}, angle: 0, vx: 0, vy: 0,
+            username: p1Data.username, perk: p1Data.perk,
+            primary: p1Data.primary, secondary: p1Data.secondary, utility: p1Data.utility
+          },
+          [p2.id]: { 
+            id: p2.id, x: MAP_WIDTH - 100, y: MAP_HEIGHT/2, 
+            hp: 100, maxHp: 100, color: "blue", score: 0, connected: true, matchToken: token2,
+            cooldowns: {}, angle: Math.PI, vx: 0, vy: 0,
+            username: p2Data.username, perk: p2Data.perk,
+            primary: p2Data.primary, secondary: p2Data.secondary, utility: p2Data.utility
+          },
+        },
+        bullets: [],
+        tickCount: 0,
+        lastUpdate: Date.now(),
+      };
+
+      // Apply Vitality Perk
+      if(rooms[roomId].players[p1.id].perk === "vitality") {
+          rooms[roomId].players[p1.id].maxHp = 130;
+          rooms[roomId].players[p1.id].hp = 130;
+      }
+      if(rooms[roomId].players[p2.id].perk === "vitality") {
+          rooms[roomId].players[p2.id].maxHp = 130;
+          rooms[roomId].players[p2.id].hp = 130;
+      }
+
+      p1.join(roomId);
+      p2.join(roomId);
+
+      p1.emit("matchFound", { roomId, playerId: p1.id, players: rooms[roomId].players, matchToken: token1 });
+      p2.emit("matchFound", { roomId, playerId: p2.id, players: rooms[roomId].players, matchToken: token2 });
+
+      console.log(`[MATCH] Created Room ${roomId}`);
+    }
+  });
+
+  // ===============================================
+  //  REJOIN GAME (Explicit Handler)
+  // ===============================================
+  socket.on("rejoinGame", (data) => {
+      handleRejoin(socket, data.token);
+  });
+
+  // Helper function to handle logic (shared with joinQueue)
+  function handleRejoin(sock, token) {
+      if (!token) return;
+
+      let foundRoomId = null;
+      let oldSocketId = null;
+
+      for (const rID in rooms) {
+        const room = rooms[rID];
+        const pID = Object.keys(room.players).find(
+          (id) => room.players[id].matchToken === token
+        );
         if (pID) {
           foundRoomId = rID;
           oldSocketId = pID;
@@ -193,160 +311,47 @@ io.on("connection", (socket) => {
       }
 
       if (foundRoomId && oldSocketId) {
-        const room = rooms[foundRoomId];
-        
-        // RECOVERY LOGIC:
-        // 1. If the socket ID hasn't changed (rare), just update
-        // 2. If it HAS changed, swap the data to the new ID
-        
-        const playerData = room.players[oldSocketId];
+         const room = rooms[foundRoomId];
+         const pData = room.players[oldSocketId];
 
-        if (socket.id !== oldSocketId) {
-            // Assign data to new ID
-            room.players[socket.id] = playerData;
-            room.players[socket.id].id = socket.id;
-            // Remove old ID to prevent "ghosts"
+         // If socket ID changed (likely), swap them
+         if (sock.id !== oldSocketId) {
+            room.players[sock.id] = pData;
+            room.players[sock.id].id = sock.id;
             delete room.players[oldSocketId];
-        }
+            
+            // Clear old disconnect timer if it exists
+            if(disconnectTimers[oldSocketId]) {
+                clearTimeout(disconnectTimers[oldSocketId]);
+                delete disconnectTimers[oldSocketId];
+            }
+         }
 
-        // Mark as connected
-        room.players[socket.id].connected = true;
-
-        console.log(`[REJOIN] Success! Swapped ${oldSocketId} for ${socket.id} in Room ${foundRoomId}`);
-
-        // Notify Client
-        socket.join(foundRoomId);
-        socket.emit("matchFound", {
-          roomId: foundRoomId,
-          playerId: socket.id,
-          players: room.players,
-          matchToken: token
-        });
-
-        // Notify Opponent (So they know to resume)
-        socket.to(foundRoomId).emit("opponentStatus", { status: "reconnected", id: socket.id });
-        
-        return; 
+         room.players[sock.id].connected = true;
+         sock.join(foundRoomId);
+         
+         sock.emit("rejoinSuccess", {
+           roomID: foundRoomId,
+           me: room.players[sock.id],
+           players: room.players
+         });
+         
+         // Notify opponent
+         io.to(foundRoomId).emit("opponentStatus", { status: "reconnected", id: sock.id });
+         console.log(`[REJOIN] ${pData.username} rejoined Room ${foundRoomId}`);
       } else {
-        console.log(`[REJOIN] Failed. Token ${token} not found.`);
-        socket.emit("matchError", "Match Expired or Invalid");
-        return; 
+         sock.emit("rejoinFailed");
       }
-    }
-
-    // --- 2. NORMAL QUEUE LOGIC (No token / New Game) ---
-    
-    // Check if already in queue to prevent duplicates
-    if (waitingPlayers.some(s => s.id === socket.id)) return;
-
-    console.log(`[QUEUE] Player ${socket.id} joined queue`);
-    waitingPlayers.push(socket);
-
-    // Filter out disconnected people from queue before matching
-    waitingPlayers = waitingPlayers.filter(s => s.connected);
-
-    if (waitingPlayers.length >= 2) {
-      const p1 = waitingPlayers.shift();
-      const p2 = waitingPlayers.shift();
-
-      // Double check connection status
-      if (!p1.connected || !p2.connected) {
-         if (p1.connected) waitingPlayers.unshift(p1);
-         if (p2.connected) waitingPlayers.unshift(p2);
-         return;
-      }
-
-      const roomId = `room_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-      
-      const token1 = `token_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-      const token2 = `token_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-
-      rooms[roomId] = {
-        id: roomId,
-        gameStartTime: Date.now() + COUNTDOWN_TIME, // Use constant
-        players: {
-          [p1.id]: { 
-            id: p1.id, x: 100, y: 100, hp: 100, maxHp: 100, 
-            color: "red", score: 0, connected: true, matchToken: token1,
-            cooldowns: {}, angle: 0, vx: 0, vy: 0 
-          },
-          [p2.id]: { 
-            id: p2.id, x: 1820, y: 980, hp: 100, maxHp: 100, 
-            color: "blue", score: 0, connected: true, matchToken: token2,
-            cooldowns: {}, angle: 0, vx: 0, vy: 0
-          },
-        },
-        bullets: [],
-        tickCount: 0,
-        lastUpdate: Date.now(),
-      };
-
-      p1.join(roomId);
-      p2.join(roomId);
-
-      p1.emit("matchFound", { roomId, playerId: p1.id, players: rooms[roomId].players, matchToken: token1 });
-      p2.emit("matchFound", { roomId, playerId: p2.id, players: rooms[roomId].players, matchToken: token2 });
-
-      console.log(`[MATCH] Created Room ${roomId} for ${p1.id} vs ${p2.id}`);
-    }
-  });
-
-  // ===============================================
-  //  REJOIN GAME (Explicit Handler)
-  // ===============================================
-  socket.on("rejoinGame", (data) => {
-    // Redirect to the logic inside joinQueue to keep it centralized, 
-    // or we can handle it here. Let's reuse the logic via a fake call 
-    // or just copy the logic. For safety, I'll copy the robust logic here.
-    const token = data.token;
-    let foundRoomId = null;
-    let oldSocketId = null;
-
-    for (const rID in rooms) {
-      const room = rooms[rID];
-      const pID = Object.keys(room.players).find(
-        (id) => room.players[id].matchToken === token
-      );
-      if (pID) {
-        foundRoomId = rID;
-        oldSocketId = pID;
-        break;
-      }
-    }
-
-    if (foundRoomId && oldSocketId) {
-       const room = rooms[foundRoomId];
-       const pData = room.players[oldSocketId];
-
-       if (socket.id !== oldSocketId) {
-          room.players[socket.id] = pData;
-          room.players[socket.id].id = socket.id;
-          delete room.players[oldSocketId];
-       }
-       room.players[socket.id].connected = true;
-       socket.join(foundRoomId);
-       
-       socket.emit("rejoinSuccess", {
-          roomID: foundRoomId,
-          me: room.players[socket.id],
-          players: room.players
-       });
-       io.to(foundRoomId).emit("opponentStatus", { status: "reconnected", id: socket.id });
-    } else {
-       socket.emit("rejoinFailed");
-    }
-  });
+  }
 
 
   // ===============================================
-  // FORFEIT LOGIC
+  //  FORFEIT LOGIC
   // ===============================================
   socket.on("forfeitMatch", (data) => {
-    // 1. SCENARIO: Forfeit via Token (Reloaded / Rejoin Popup)
+    // 1. SCENARIO: Forfeit via Token
     if (data && data.matchToken) {
       const token = data.matchToken;
-      console.log(`[FORFEIT] Server received Token: ${token}`);
-
       let targetRoomId = null;
       let forfeiterId = null; 
 
@@ -371,7 +376,7 @@ io.on("connection", (socket) => {
       return; 
     }
 
-    // 2. SCENARIO: Forfeit In-Game (Socket ID is valid)
+    // 2. SCENARIO: Forfeit In-Game
     let targetRoomId = null;
     for (const rID in rooms) {
       if (rooms[rID].players[socket.id]) {
@@ -397,7 +402,8 @@ io.on("connection", (socket) => {
       const room = rooms[data.roomID];
       const isCountdown = Date.now() < room.gameStartTime;
 
-      if (!isCountdown && Math.abs(player.vx) < 2 && Math.abs(player.vy) < 2) {
+      if (!isCountdown) {
+        // Simple smoothing
         player.x = data.x;
         player.y = data.y;
       }
@@ -406,7 +412,7 @@ io.on("connection", (socket) => {
   });
 
   // ===============================================
-  //  SHOOTING & ABILITIES (YOUR CUSTOM LOGIC)
+  //  SHOOTING & ABILITIES
   // ===============================================
   socket.on("playerShoot", (data) => {
     const room = rooms[data.roomID];
@@ -418,13 +424,12 @@ io.on("connection", (socket) => {
     const now = Date.now();
     const slot = data.slot;
 
-    // Ensure cooldowns object exists
     if (!p.cooldowns) p.cooldowns = {};
-    if (p.cooldowns[slot] > now) return;
+    if (p.cooldowns[slot] && p.cooldowns[slot] > now) return;
 
     // UTILITY LOGIC
     if (slot === "utility") {
-      const utilType = p.utility || "dash"; // Fallback to dash if undefined
+      const utilType = p.utility || "dash"; 
       let cdTime = 0;
 
       if (utilType === "dash") {
@@ -434,10 +439,7 @@ io.on("connection", (socket) => {
 
         p.speedMult = DASH_MULTIPLIER;
         io.to(room.id).emit("applyBuff", {
-          id: socket.id,
-          type: "speed",
-          val: p.speedMult,
-          duration: DASH_DURATION,
+          id: socket.id, type: "speed", val: p.speedMult, duration: DASH_DURATION,
         });
 
         setTimeout(() => {
@@ -445,33 +447,32 @@ io.on("connection", (socket) => {
         }, DASH_DURATION);
 
         cdTime = COOLDOWNS.dash;
-      } else if (utilType === "shield") {
+      } 
+      else if (utilType === "shield") {
         p.shield = true;
         cdTime = 0;
+        // Auto-expire shield
         setTimeout(() => {
           if (rooms[data.roomID]?.players[socket.id]?.shield) {
             rooms[data.roomID].players[socket.id].shield = false;
-            rooms[data.roomID].players[socket.id].cooldowns.utility =
-              Date.now() + COOLDOWNS.shield;
+            rooms[data.roomID].players[socket.id].cooldowns.utility = Date.now() + COOLDOWNS.shield;
             io.to(data.roomID).emit("cooldownUpdate", {
-              id: socket.id,
-              cooldowns: rooms[data.roomID].players[socket.id].cooldowns,
+              id: socket.id, cooldowns: rooms[data.roomID].players[socket.id].cooldowns,
             });
+            io.to(data.roomID).emit("opponentUpdate", { id: socket.id, shield: false });
           }
         }, SHIELD_DURATION);
-      } else if (utilType === "cloak") {
+      } 
+      else if (utilType === "cloak") {
         p.invisible = true;
         cdTime = COOLDOWNS.cloak;
         setTimeout(() => {
           if (rooms[data.roomID]?.players[socket.id]) p.invisible = false;
         }, CLOAK_DURATION);
-      } else if (utilType === "repulse") {
+      } 
+      else if (utilType === "repulse") {
         cdTime = COOLDOWNS.repulse;
-        io.to(room.id).emit("visualEffect", {
-          type: "repulse",
-          x: p.x,
-          y: p.y,
-        });
+        io.to(room.id).emit("visualEffect", { type: "repulse", x: p.x, y: p.y });
 
         let hitAnyone = false;
         Object.keys(room.players).forEach((pid) => {
@@ -491,59 +492,42 @@ io.on("connection", (socket) => {
             hitAnyone = true;
           }
         });
-
-        if (hitAnyone) {
-          broadcastRoomState(room);
-        }
+        if (hitAnyone) broadcastRoomState(room);
       }
 
       if (utilType !== "shield") {
         p.cooldowns.utility = now + cdTime;
       }
-
-      io.to(room.id).emit("cooldownUpdate", {
-        id: socket.id,
-        cooldowns: p.cooldowns,
-      });
+      io.to(room.id).emit("cooldownUpdate", { id: socket.id, cooldowns: p.cooldowns });
       return;
     }
 
     // WEAPON LOGIC
-    if (p.invisible) {
-      p.invisible = false;
-    }
+    if (p.invisible) p.invisible = false;
 
     const weaponKey = slot === "primary" ? p.primary : p.secondary;
-    // Safety check if weaponKey is missing
     const stats = WEAPONS[weaponKey] || WEAPONS["pulse"];
 
     let actualCD = stats.cooldown;
     if (p.perk === "haste") actualCD *= 0.85;
     p.cooldowns[slot] = now + actualCD;
 
+    // Mine Logic
     if (stats.type === "mine") {
       let actualDamage = stats.damage;
       if (p.perk === "lethality") actualDamage *= 1.15;
       room.bullets.push({
         id: `m_${Date.now()}_${Math.random()}`,
         ownerId: socket.id,
-        x: p.x,
-        y: p.y,
-        angle: 0,
-        speed: 0,
-        damage: actualDamage,
-        color: stats.color,
-        range: stats.life,
-        traveled: 0,
-        isMine: true,
+        x: p.x, y: p.y, angle: 0, speed: 0,
+        damage: actualDamage, color: stats.color, range: stats.life,
+        traveled: 0, isMine: true, blastRadius: 150
       });
-      io.to(room.id).emit("cooldownUpdate", {
-        id: socket.id,
-        cooldowns: p.cooldowns,
-      });
+      io.to(room.id).emit("cooldownUpdate", { id: socket.id, cooldowns: p.cooldowns });
       return;
     }
 
+    // Gun Logic
     const count = stats.count || 1;
     const spread = stats.spread || 0;
     const spawnDist = PLAYER_RADIUS + 15;
@@ -553,8 +537,7 @@ io.on("connection", (socket) => {
     for (let i = 0; i < count; i++) {
       let finalAngle;
       if (count === 1) finalAngle = data.angle;
-      else if (spread >= 6.28)
-        finalAngle = data.angle + i * ((Math.PI * 2) / count);
+      else if (spread >= 6.28) finalAngle = data.angle + i * ((Math.PI * 2) / count);
       else finalAngle = startAngle + i * (spread / (count - 1));
 
       let actualDamage = stats.damage;
@@ -579,10 +562,7 @@ io.on("connection", (socket) => {
       });
     }
 
-    io.to(room.id).emit("cooldownUpdate", {
-      id: socket.id,
-      cooldowns: p.cooldowns,
-    });
+    io.to(room.id).emit("cooldownUpdate", { id: socket.id, cooldowns: p.cooldowns });
   });
 
   // --- RECONNECT / DISCONNECT / LEAVE ---
@@ -595,13 +575,11 @@ io.on("connection", (socket) => {
   });
 
   // ===============================================
-  //  SMART DISCONNECT (Checks player count first)
+  //  SMART DISCONNECT (Fixed to use disconnectTimers)
   // ===============================================
   socket.on("disconnect", () => {
-    // 0. Remove from Queue if they are waiting
     waitingPlayers = waitingPlayers.filter(s => s.id !== socket.id);
 
-    // 1. Find the room
     let roomId = null;
     for (const rID in rooms) {
       if (rooms[rID].players[socket.id]) {
@@ -610,45 +588,36 @@ io.on("connection", (socket) => {
       }
     }
 
-    if (!roomId) return; // Player wasn't in a game
+    if (!roomId) return; 
 
     const room = rooms[roomId];
-    
-    // Safety check: Make sure player object exists
     if (!room.players[socket.id]) return;
 
     console.log(`[DISCONNECT] Player ${socket.id} disconnected from Room ${roomId}`);
-
-    // 2. Mark this specific player as disconnected
     room.players[socket.id].connected = false;
 
-    // 3. Count how many players are arguably still "there"
     const activePlayers = Object.values(room.players).filter(p => p.connected).length;
 
     if (activePlayers === 0) {
-      // SCENARIO A: Everyone is gone.
-      console.log(`[ROOM] Room ${roomId} is empty. Deleting immediately.`);
+      // Room empty
+      console.log(`[ROOM] Room ${roomId} is empty. Deleting.`);
       delete rooms[roomId];
     } else {
-      // SCENARIO B: Someone is still in the room!
-      console.log(`[ROOM] Room ${roomId} still has ${activePlayers} player(s). Keeping open.`);
-
-      // Notify the survivor that their opponent is gone
+      // Opponent still there
+      console.log(`[ROOM] Room ${roomId} waiting for reconnect.`);
       io.to(roomId).emit("opponentStatus", { status: "disconnected", id: socket.id });
 
-      // Start the "Bleed Out" timer (30 seconds)
-      setTimeout(() => {
-        // Re-check: Is the room still there? Is the player still gone?
+      // STORE THE TIMER SO WE CAN CANCEL IT ON REJOIN
+      disconnectTimers[socket.id] = setTimeout(() => {
+        // Re-check existence
         if (rooms[roomId] && rooms[roomId].players[socket.id]) {
           if (rooms[roomId].players[socket.id].connected === false) {
             console.log(`[TIMEOUT] Player ${socket.id} did not return. Ending game.`);
-            
-            // The person who stayed is the winner
             const winnerId = Object.keys(rooms[roomId].players).find(id => id !== socket.id);
             endGame(roomId, "opponent_disconnect", winnerId, socket.id);
           }
         }
-      }, 30000); 
+      }, 30000); // 30 Seconds
     }
   });
 
@@ -693,7 +662,7 @@ function broadcastRoomState(room) {
 }
 
 function updateRoom(room) {
-  // NEW: FREEZE GAME IF COUNTDOWN IS RUNNING
+  // FREEZE GAME IF COUNTDOWN IS RUNNING
   if (Date.now() < room.gameStartTime) {
     Object.values(room.players).forEach((p) => {
       p.vx = 0;
@@ -721,12 +690,12 @@ function updateRoom(room) {
       const isPinball = p.repulseEndTime && p.repulseEndTime > now;
 
       // Determine Friction
-      let friction = 0.92; // Standard Floor friction
-      if (isPinball) friction = 1.0; // ZERO Friction
+      let friction = 0.92; 
+      if (isPinball) friction = 1.0; 
 
       // Determine Wall Bounce
-      let wallBounce = -0.5; // Standard 'dull' bounce
-      if (isPinball) wallBounce = -1.0; // PERFECT BOUNCE
+      let wallBounce = -0.5; 
+      if (isPinball) wallBounce = -1.0; 
 
       // Adaptive Network Rate
       if (Math.abs(p.vx) > 2 || Math.abs(p.vy) > 2) {
@@ -788,10 +757,8 @@ function updateRoom(room) {
 
     if (
       b.traveled > b.range ||
-      b.x < 0 ||
-      b.x > MAP_WIDTH ||
-      b.y < 0 ||
-      b.y > MAP_HEIGHT
+      b.x < 0 || b.x > MAP_WIDTH ||
+      b.y < 0 || b.y > MAP_HEIGHT
     ) {
       bulletsToRemove.push(b.id);
     }
@@ -806,25 +773,17 @@ function updateRoom(room) {
       if (getDistance(b, player) < PLAYER_RADIUS + 6) {
         if (player.shield) {
           player.shield = false;
-          // Ensure cooldowns exist
           if(!player.cooldowns) player.cooldowns = {};
           
           player.cooldowns.utility = Date.now() + COOLDOWNS.shield;
           io.to(room.id).emit("visualEffect", {
-            type: "shieldBreak",
-            x: player.x,
-            y: player.y,
+            type: "shieldBreak", x: player.x, y: player.y,
           });
           io.to(room.id).emit("cooldownUpdate", {
-            id: playerId,
-            cooldowns: player.cooldowns,
+            id: playerId, cooldowns: player.cooldowns,
           });
           io.to(room.id).emit("opponentUpdate", {
-            id: playerId,
-            x: player.x,
-            y: player.y,
-            angle: player.angle,
-            shield: false,
+            id: playerId, x: player.x, y: player.y, angle: player.angle, shield: false,
           });
           bulletsToRemove.push(b.id);
           break;
@@ -833,6 +792,7 @@ function updateRoom(room) {
           player.lastDamageTime = Date.now();
 
           if (b.explosive) {
+            io.to(room.id).emit("visualEffect", { type: "hit", x: b.x, y: b.y }); // Hit effect
             for (const targetId in room.players) {
               if (targetId === b.ownerId) continue;
               const target = room.players[targetId];
@@ -842,6 +802,8 @@ function updateRoom(room) {
                 target.lastDamageTime = Date.now();
               }
             }
+          } else {
+             io.to(room.id).emit("visualEffect", { type: "hit", x: b.x, y: b.y });
           }
 
           io.to(room.id).emit("playerDamage", { id: playerId, hp: player.hp });
@@ -887,7 +849,7 @@ function endGame(roomId, reason, winnerId, loserId) {
     // Clear any pending timers for this room
     Object.keys(rooms[roomId].players).forEach((pid) => {
       if (disconnectTimers[pid]) {
-        clearInterval(disconnectTimers[pid]);
+        clearTimeout(disconnectTimers[pid]);
         delete disconnectTimers[pid];
       }
     });
