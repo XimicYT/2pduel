@@ -29,8 +29,7 @@ const PLAYER_RADIUS = 30;
 const COUNTDOWN_TIME = 3000; // 3 Seconds before game starts
 
 // --- ABILITY CONSTANTS ---
-const REGEN_DELAY = 5000;
-const REGEN_RATE = 2;
+
 const DASH_DURATION = 500;
 const DASH_MULTIPLIER = 2.5;
 const CLOAK_DURATION = 5000;
@@ -534,38 +533,49 @@ io.on("connection", (socket) => {
 
   // *** FIXED FORFEIT LOGIC IS HERE ***
   // Handles both Menu Forfeit (Token based) and In-Game Forfeit (Socket based)
+  // *** FIXED FORFEIT LOGIC ***
   socket.on("forfeitMatch", (data) => {
-    // 1. SCENARIO: Forfeit via Menu Popup (Uses Token)
+    // SCENARIO 1: Forfeit via Token (Reloaded / Rejoin Popup)
     if (data && data.matchToken) {
       const token = data.matchToken;
-      console.log(`[FORFEIT] Request via Token: ${token}`);
+      console.log(`[FORFEIT] Received Token: ${token}`);
 
       let targetRoomId = null;
       let forfeiterId = null; // The OLD socket ID
 
+      // 1. Find the room that contains this token
       for (const rID in rooms) {
         const room = rooms[rID];
+        // Look through all players in this room
         const pID = Object.keys(room.players).find(
           (id) => room.players[id].matchToken === token
         );
+        
         if (pID) {
           targetRoomId = rID;
-          forfeiterId = pID;
+          forfeiterId = pID; // This is the ID of the player currently in the game (likely the disconnected one)
           break;
         }
       }
 
       if (targetRoomId && forfeiterId) {
+        console.log(`[FORFEIT] Found room ${targetRoomId}. Forfeiter (Old ID): ${forfeiterId}`);
+        
+        // Find the winner (the person who is NOT the forfeiter)
         const winnerId = Object.keys(rooms[targetRoomId].players).find(
           (id) => id !== forfeiterId
         );
-        // Correctly passing Winner and Loser
+
         endGame(targetRoomId, "forfeit", winnerId, forfeiterId);
-        return; // Stop here
+      } else {
+        console.log("[FORFEIT] No room found for this token.");
       }
+      return; 
     }
 
-    // 2. SCENARIO: Forfeit In-Game (Uses Socket ID)
+    // SCENARIO 2: Forfeit In-Game (Socket ID is still valid)
+    console.log(`[FORFEIT] Request via Active Socket: ${socket.id}`);
+    
     let targetRoomId = null;
     for (const rID in rooms) {
       if (rooms[rID].players[socket.id]) {
@@ -579,6 +589,8 @@ io.on("connection", (socket) => {
         (id) => id !== socket.id
       );
       endGame(targetRoomId, "forfeit", winnerId, socket.id);
+    } else {
+      console.log("[FORFEIT] Socket is not in any active room.");
     }
   });
 
@@ -773,13 +785,6 @@ function updateRoom(room) {
       if (p.y > MAP_HEIGHT - PLAYER_RADIUS) {
         p.y = MAP_HEIGHT - PLAYER_RADIUS;
         p.vy *= wallBounce;
-      }
-    }
-
-    // Regen Logic
-    if (p.hp < p.maxHp && p.hp > 0) {
-      if (now - p.lastDamageTime > REGEN_DELAY) {
-        p.hp = Math.min(p.maxHp, p.hp + REGEN_RATE / 60);
       }
     }
   });
