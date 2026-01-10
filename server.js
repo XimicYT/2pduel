@@ -148,12 +148,15 @@ io.on('connection', (socket) => {
             const p1ID = waitingPlayer.id;
             const p2ID = socket.id;
 
+            const matchToken = `${roomID}_${Math.random().toString(36).substr(2, 9)}`;
+
             // Set Spawn Positions
             const p1State = { ...waitingPlayer.state, id: p1ID, x: 100, y: 540, angle: 0 };
             const p2State = { ...newPlayerState, id: p2ID, x: 1820, y: 540, angle: Math.PI };
 
             rooms[roomID] = {
                 id: roomID,
+                matchToken: matchToken, // Store token in room
                 tickCount: 0, 
                 bullets: [],
                 players: { [p1ID]: p1State, [p2ID]: p2State }
@@ -162,7 +165,11 @@ io.on('connection', (socket) => {
             waitingPlayer.socket.join(roomID);
             socket.join(roomID);
 
-            io.to(roomID).emit('matchFound', { roomID, players: rooms[roomID].players });
+            io.to(roomID).emit('matchFound', { 
+                roomID, 
+                matchToken, // <--- IMPORTANT: Client needs this to reconnect
+                players: rooms[roomID].players 
+            });
             waitingPlayer = null; 
         } else {
             // Wait in Queue
@@ -338,36 +345,74 @@ io.on('connection', (socket) => {
         findRoomAndEnd(socket.id, 'draw', null); 
     });
 
-    socket.on('reconnectRequest', (data) => {
-        const { roomID, oldSocketID } = data;
-        if (rooms[roomID] && rooms[roomID].players[oldSocketID]) {
-            if (disconnectTimers[oldSocketID]) { 
-                clearInterval(disconnectTimers[oldSocketID]); 
-                delete disconnectTimers[oldSocketID]; 
+    // --- REJOIN HANDLER ---
+    socket.on('rejoinGame', (data) => {
+        const { token } = data;
+        let foundRoom = null;
+        let oldSocketID = null;
+
+        // 1. Find the room with this Token
+        for (const rID in rooms) {
+            if (rooms[rID].matchToken === token) {
+                foundRoom = rooms[rID];
+                break;
             }
-            const pData = rooms[roomID].players[oldSocketID];
-            delete rooms[roomID].players[oldSocketID];
-            rooms[roomID].players[socket.id] = pData;
-            pData.id = socket.id; 
-            pData.vx = 0; 
-            pData.vy = 0;
+        }
+
+        if (foundRoom) {
+            // 2. Identify which player this is (the one who is currently disconnected)
+            // We look for the player that has a running disconnectTimer
+            oldSocketID = Object.keys(foundRoom.players).find(pid => disconnectTimers[pid]);
             
-            socket.join(roomID);
-            socket.emit('reconnectSuccess', { roomID, me: pData, players: rooms[roomID].players });
-            setTimeout(() => { 
-                io.to(roomID).emit('matchResumed', { reconnectedId: socket.id, resumeIn: 3 }); 
-            }, 100);
-        } else { 
-            socket.emit('reconnectFailed'); 
+            // If we found a disconnected spot, fill it
+            if (oldSocketID) {
+                // Stop the "bleeding out" timer
+                clearInterval(disconnectTimers[oldSocketID]);
+                delete disconnectTimers[oldSocketID];
+
+                // Swap the old ID for the new Socket ID
+                const pData = foundRoom.players[oldSocketID];
+                delete foundRoom.players[oldSocketID];
+                
+                pData.id = socket.id; // Update ID
+                foundRoom.players[socket.id] = pData;
+
+                socket.join(foundRoom.id);
+                
+                // Tell Client: Success
+                socket.emit('rejoinSuccess', { 
+                    roomID: foundRoom.id, 
+                    me: pData, 
+                    players: foundRoom.players 
+                });
+
+                // Tell Opponent: He's back
+                io.to(foundRoom.id).emit('matchResumed', { reconnectedId: socket.id });
+                console.log(`Player reconnected to ${foundRoom.id}`);
+            } else {
+                // Room exists, but both players are arguably "connected" or something is wrong
+                socket.emit('rejoinFailed'); 
+            }
+        } else {
+            // Room does not exist (Zombie room prevented)
+            socket.emit('rejoinFailed');
         }
     });
 
+    // --- EXPLICIT LEAVE (The "Abandon" Button) ---
+    socket.on('leaveGame', () => {
+        // If client clicks "Abandon", we treat it as a forfeit
+        findRoomAndEnd(socket.id, 'forfeit', null);
+    });
+
     socket.on('disconnect', () => {
+        // 1. Handle Queue leavers
         if (waitingPlayer && waitingPlayer.id === socket.id) { 
             waitingPlayer = null; 
             return; 
         }
 
+        // 2. Find which room they were in
         let targetRoomId = null;
         for (const rID in rooms) { 
             if (rooms[rID].players[socket.id]) { 
@@ -377,7 +422,12 @@ io.on('connection', (socket) => {
         }
 
         if (targetRoomId) {
+            const room = rooms[targetRoomId];
+            
+            // Notify opponent
             io.to(targetRoomId).emit('opponentDisconnected', { id: socket.id });
+
+            // Start the bleed-out timer
             disconnectTimers[socket.id] = setInterval(() => {
                 if (!rooms[targetRoomId]) { 
                     clearInterval(disconnectTimers[socket.id]); 
@@ -395,6 +445,26 @@ io.on('connection', (socket) => {
                     clearInterval(disconnectTimers[socket.id]); 
                 }
             }, 1000);
+
+            // === ZOMBIE ROOM PREVENTER ===
+            // Check if ALL players in this room are now disconnected
+            const totalPlayers = Object.keys(room.players).length;
+            const disconnectedPlayers = Object.keys(disconnectTimers).filter(id => room.players[id]).length;
+
+            if (disconnectedPlayers >= totalPlayers) {
+                console.log(`Room ${targetRoomId} abandoned by all players. Destroying.`);
+                
+                // Clear all timers associated with this room
+                Object.keys(room.players).forEach(pid => {
+                    if (disconnectTimers[pid]) {
+                        clearInterval(disconnectTimers[pid]);
+                        delete disconnectTimers[pid];
+                    }
+                });
+
+                // Destroy the room
+                delete rooms[targetRoomId];
+            }
         }
     });
 
