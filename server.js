@@ -233,46 +233,9 @@ io.on("connection", (socket) => {
       repulseEndTime: 0,
       speedMult: 1.0,
     };
-    // Handle Forfeit via Token (Used when declining a Rejoin from the Popup)
-    socket.on("forfeitMatch", (data) => {
-      const token = data.matchToken;
-      if (!token) return;
 
-      console.log(`[FORFEIT REQUEST] Received for token: ${token}`);
+    // NOTE: Removed the nested forfeitMatch listener from here
 
-      // 1. Find the room associated with this token
-      let targetRoomId = null;
-      let targetPlayerId = null; // This will be the OLD socket ID (the disconnected one)
-
-      // Iterate through all active rooms to find the token
-      // (Assuming 'rooms' is your Map of active games)
-      for (const [roomId, room] of rooms) {
-        const foundPlayerId = Object.keys(room.players).find(
-          (id) => room.players[id].matchToken === token
-        );
-
-        if (foundPlayerId) {
-          targetRoomId = roomId;
-          targetPlayerId = foundPlayerId;
-          break;
-        }
-      }
-
-      // 2. End the game if found
-      if (targetRoomId && targetPlayerId) {
-        // Trigger the standard game over logic
-        // 'forfeit' is the reason, targetPlayerId is the loser
-        endGame(targetRoomId, "forfeit", targetPlayerId);
-
-        console.log(
-          `[FORFEIT SUCCESS] Room ${targetRoomId} ended. Loser: ${targetPlayerId}`
-        );
-      } else {
-        console.log(
-          `[FORFEIT FAILED] Could not find active room for token: ${token}`
-        );
-      }
-    });
     if (waitingPlayer) {
       // Match Found
       const roomID = `room_${Date.now()}`;
@@ -301,7 +264,7 @@ io.on("connection", (socket) => {
         id: roomID,
         matchToken: matchToken,
         tickCount: 0,
-        gameStartTime: Date.now() + COUNTDOWN_TIME, // NEW: Delay physics
+        gameStartTime: Date.now() + COUNTDOWN_TIME,
         bullets: [],
         players: { [p1ID]: p1State, [p2ID]: p2State },
       };
@@ -315,7 +278,6 @@ io.on("connection", (socket) => {
         players: rooms[roomID].players,
       });
 
-      // NEW: Tell clients to start their 3 second countdown
       io.to(roomID).emit("startCountdown", 3);
 
       waitingPlayer = null;
@@ -334,8 +296,6 @@ io.on("connection", (socket) => {
   socket.on("playerUpdate", (data) => {
     if (rooms[data.roomID] && rooms[data.roomID].players[socket.id]) {
       const player = rooms[data.roomID].players[socket.id];
-
-      // PHYSICS CHECK: Ignore client position if being knocked back OR if countdown active
       const room = rooms[data.roomID];
       const isCountdown = Date.now() < room.gameStartTime;
 
@@ -352,17 +312,15 @@ io.on("connection", (socket) => {
     const room = rooms[data.roomID];
     if (!room || !room.players[socket.id]) return;
 
-    // NEW: Block shooting during countdown
     if (Date.now() < room.gameStartTime) return;
 
     const p = room.players[socket.id];
     const now = Date.now();
     const slot = data.slot;
 
-    // 1. Check Global Cooldown for this slot
     if (p.cooldowns[slot] > now) return;
 
-    // 2. UTILITY LOGIC
+    // UTILITY LOGIC
     if (slot === "utility") {
       const utilType = p.utility;
       let cdTime = 0;
@@ -424,21 +382,14 @@ io.on("connection", (socket) => {
           if (dist < 400) {
             const angle = Math.atan2(dy, dx);
             const force = 80;
-
-            // Apply Massive Velocity
             enemy.vx = Math.cos(angle) * force;
             enemy.vy = Math.sin(angle) * force;
-
-            // Pinball Mode
             enemy.repulseEndTime = Date.now() + REPULSE_DURATION;
-
-            // Notify Victim (Visuals/Camera Shake)
             io.to(pid).emit("forcePush", { angle: angle, force: 30 });
             hitAnyone = true;
           }
         });
 
-        // === IMMEDIATE BROADCAST ===
         if (hitAnyone) {
           broadcastRoomState(room);
         }
@@ -455,7 +406,7 @@ io.on("connection", (socket) => {
       return;
     }
 
-    // 3. WEAPON LOGIC
+    // WEAPON LOGIC
     if (p.invisible) {
       p.invisible = false;
     }
@@ -541,7 +492,6 @@ io.on("connection", (socket) => {
     let foundRoom = null;
     let oldSocketID = null;
 
-    // 1. Find the room with this Token
     for (const rID in rooms) {
       if (rooms[rID].matchToken === token) {
         foundRoom = rooms[rID];
@@ -550,21 +500,18 @@ io.on("connection", (socket) => {
     }
 
     if (foundRoom) {
-      // 2. Identify which player this is
       oldSocketID = Object.keys(foundRoom.players).find(
         (pid) => disconnectTimers[pid]
       );
 
       if (oldSocketID) {
-        // Stop the "bleeding out" timer
         clearInterval(disconnectTimers[oldSocketID]);
         delete disconnectTimers[oldSocketID];
 
-        // Swap the old ID for the new Socket ID
         const pData = foundRoom.players[oldSocketID];
         delete foundRoom.players[oldSocketID];
 
-        pData.id = socket.id; // Update ID
+        pData.id = socket.id;
         foundRoom.players[socket.id] = pData;
 
         socket.join(foundRoom.id);
@@ -585,7 +532,40 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("forfeitMatch", () => {
+  // *** FIXED FORFEIT LOGIC IS HERE ***
+  // Handles both Menu Forfeit (Token based) and In-Game Forfeit (Socket based)
+  socket.on("forfeitMatch", (data) => {
+    // 1. SCENARIO: Forfeit via Menu Popup (Uses Token)
+    if (data && data.matchToken) {
+      const token = data.matchToken;
+      console.log(`[FORFEIT] Request via Token: ${token}`);
+
+      let targetRoomId = null;
+      let forfeiterId = null; // The OLD socket ID
+
+      for (const rID in rooms) {
+        const room = rooms[rID];
+        const pID = Object.keys(room.players).find(
+          (id) => room.players[id].matchToken === token
+        );
+        if (pID) {
+          targetRoomId = rID;
+          forfeiterId = pID;
+          break;
+        }
+      }
+
+      if (targetRoomId && forfeiterId) {
+        const winnerId = Object.keys(rooms[targetRoomId].players).find(
+          (id) => id !== forfeiterId
+        );
+        // Correctly passing Winner and Loser
+        endGame(targetRoomId, "forfeit", winnerId, forfeiterId);
+        return; // Stop here
+      }
+    }
+
+    // 2. SCENARIO: Forfeit In-Game (Uses Socket ID)
     let targetRoomId = null;
     for (const rID in rooms) {
       if (rooms[rID].players[socket.id]) {
@@ -625,7 +605,6 @@ io.on("connection", (socket) => {
 
       io.to(targetRoomId).emit("opponentDisconnected", { id: socket.id });
 
-      // Start the bleed-out timer
       disconnectTimers[socket.id] = setInterval(() => {
         if (!rooms[targetRoomId]) {
           clearInterval(disconnectTimers[socket.id]);
@@ -649,16 +628,12 @@ io.on("connection", (socket) => {
         }
       }, 1000);
 
-      // === ZOMBIE ROOM PREVENTER ===
       const totalPlayers = Object.keys(room.players).length;
       const disconnectedPlayers = Object.keys(disconnectTimers).filter(
         (id) => room.players[id]
       ).length;
 
       if (disconnectedPlayers >= totalPlayers) {
-        console.log(
-          `Room ${targetRoomId} abandoned by all players. Destroying.`
-        );
         Object.keys(room.players).forEach((pid) => {
           if (disconnectTimers[pid]) {
             clearInterval(disconnectTimers[pid]);
@@ -674,7 +649,6 @@ io.on("connection", (socket) => {
     if (typeof cb === "function") cb();
   });
 });
-
 // ==================================================================
 // 6. GAME LOOP (PHYSICS & REGEN)
 // ==================================================================
