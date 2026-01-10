@@ -22,24 +22,24 @@ const PORT = process.env.PORT || 3000;
 // ==================================================================
 // 2. CONFIGURATION & CONSTANTS
 // ==================================================================
-const TICK_RATE = 1000 / 60; // 60 Physics calculations per second
-const BROADCAST_RATE = 2; // Normal State: Send updates every 2 ticks (30Hz)
+const TICK_RATE = 1000 / 60; 
+const BROADCAST_RATE = 2; 
 
 const MAP_WIDTH = 1920;
 const MAP_HEIGHT = 1080;
 const PLAYER_RADIUS = 30;
-const COUNTDOWN_TIME = 3000; // 3 Seconds before game starts
+const COUNTDOWN_TIME = 3000; 
 
 // --- ABILITY CONSTANTS ---
 const DASH_DURATION = 500;
 const DASH_MULTIPLIER = 2.5;
 const CLOAK_DURATION = 5000;
 const SHIELD_DURATION = 10000;
-const REPULSE_DURATION = 700; // How long "Pinball Mode" lasts
+const REPULSE_DURATION = 700; 
 
 const COOLDOWNS = {
-  rifle: 200, // Fallback
-  pistol: 400, // Fallback
+  rifle: 200, 
+  pistol: 400,
   dash: 3000,
   shield: 12000,
   cloak: 8000,
@@ -144,7 +144,7 @@ const WEAPONS = {
     desc: "Proximity Mine",
   },
 
-  // --- UTILITIES (Reference) ---
+  // --- UTILITIES ---
   repulse: { cooldown: COOLDOWNS.repulse },
   dash: { cooldown: COOLDOWNS.dash },
   shield: { cooldown: COOLDOWNS.shield },
@@ -156,7 +156,7 @@ const WEAPONS = {
 // ==================================================================
 let rooms = {};
 let waitingPlayers = []; 
-let disconnectTimers = {}; // Stores setTimeout IDs
+let disconnectTimers = {}; 
 
 function getDistance(a, b) {
   return Math.sqrt(Math.pow(b.x - a.x, 2) + Math.pow(b.y - a.y, 2));
@@ -173,8 +173,7 @@ io.on("connection", (socket) => {
   // ===============================================
   socket.on("joinQueue", (data) => {
     
-    // 1. SAVE USER DATA (Important Fix: Capture Perks/Weapons)
-    // If we don't do this, players spawn with defaults
+    // 1. SAVE USER DATA
     if (data) {
         socket.userData = {
             username: data.username ? data.username.substring(0, 15) : "Agent",
@@ -196,16 +195,6 @@ io.on("connection", (socket) => {
         );
         
         if (pID) {
-          // Rejoin Logic specifically handled in 'rejoinGame' or here.
-          // Since client might emit 'rejoinGame' separately, we can let that handle it,
-          // OR handle it here if the client sends token in joinQueue.
-          // For safety, let's trigger the rejoin logic here immediately.
-          socket.emit("matchFound", {
-             rejoinParams: { token: token } // Client will see this and call rejoinGame?
-             // Or we just handle it directly:
-          });
-          // Better approach: If they have a token, we process it as a rejoin immediately
-          // reusing logic similar to rejoinGame below.
           handleRejoin(socket, token);
           return;
         }
@@ -213,13 +202,11 @@ io.on("connection", (socket) => {
     }
 
     // 3. NORMAL QUEUE LOGIC
-    // Check if already in queue
     if (waitingPlayers.some(s => s.id === socket.id)) return;
 
     console.log(`[QUEUE] Player ${socket.id} joined queue`);
     waitingPlayers.push(socket);
 
-    // Clean queue
     waitingPlayers = waitingPlayers.filter(s => s.connected);
 
     if (waitingPlayers.length >= 2) {
@@ -236,7 +223,6 @@ io.on("connection", (socket) => {
       const token1 = `token_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
       const token2 = `token_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
-      // Setup Player Objects using Saved Data
       const p1Data = p1.userData || { username: "P1", perk: "vitality", primary: "pulse", secondary: "pistol", utility: "dash" };
       const p2Data = p2.userData || { username: "P2", perk: "vitality", primary: "pulse", secondary: "pistol", utility: "dash" };
 
@@ -285,13 +271,12 @@ io.on("connection", (socket) => {
   });
 
   // ===============================================
-  //  REJOIN GAME (Explicit Handler)
+  //  REJOIN GAME
   // ===============================================
   socket.on("rejoinGame", (data) => {
       handleRejoin(socket, data.token);
   });
 
-  // Helper function to handle logic (shared with joinQueue)
   function handleRejoin(sock, token) {
       if (!token) return;
 
@@ -314,13 +299,11 @@ io.on("connection", (socket) => {
          const room = rooms[foundRoomId];
          const pData = room.players[oldSocketId];
 
-         // If socket ID changed (likely), swap them
          if (sock.id !== oldSocketId) {
             room.players[sock.id] = pData;
             room.players[sock.id].id = sock.id;
             delete room.players[oldSocketId];
             
-            // Clear old disconnect timer if it exists
             if(disconnectTimers[oldSocketId]) {
                 clearTimeout(disconnectTimers[oldSocketId]);
                 delete disconnectTimers[oldSocketId];
@@ -331,30 +314,25 @@ io.on("connection", (socket) => {
          sock.join(foundRoomId);
          
          sock.emit("rejoinSuccess", {
-           roomID: foundRoomId,
+           roomId: foundRoomId, // Corrected to camelCase
            me: room.players[sock.id],
            players: room.players
          });
          
-         // Notify opponent
          io.to(foundRoomId).emit("opponentStatus", { status: "reconnected", id: sock.id });
-         console.log(`[REJOIN] ${pData.username} rejoined Room ${foundRoomId}`);
       } else {
          sock.emit("rejoinFailed");
       }
   }
 
-
   // ===============================================
   //  FORFEIT LOGIC
   // ===============================================
   socket.on("forfeitMatch", (data) => {
-    // 1. SCENARIO: Forfeit via Token
     if (data && data.matchToken) {
       const token = data.matchToken;
       let targetRoomId = null;
       let forfeiterId = null; 
-
       for (const rID in rooms) {
         const room = rooms[rID];
         const pID = Object.keys(room.players).find(
@@ -366,17 +344,12 @@ io.on("connection", (socket) => {
           break;
         }
       }
-
       if (targetRoomId && forfeiterId) {
-        const winnerId = Object.keys(rooms[targetRoomId].players).find(
-          (id) => id !== forfeiterId
-        );
+        const winnerId = Object.keys(rooms[targetRoomId].players).find((id) => id !== forfeiterId);
         endGame(targetRoomId, "forfeit", winnerId, forfeiterId);
       }
       return; 
     }
-
-    // 2. SCENARIO: Forfeit In-Game
     let targetRoomId = null;
     for (const rID in rooms) {
       if (rooms[rID].players[socket.id]) {
@@ -384,28 +357,31 @@ io.on("connection", (socket) => {
         break;
       }
     }
-
     if (targetRoomId) {
-      const winnerId = Object.keys(rooms[targetRoomId].players).find(
-        (id) => id !== socket.id
-      );
+      const winnerId = Object.keys(rooms[targetRoomId].players).find((id) => id !== socket.id);
       endGame(targetRoomId, "forfeit", winnerId, socket.id);
     }
   });
 
   // ===============================================
-  //  MOVEMENT
+  //  MOVEMENT (FIXED: Handles both camelCase and regular)
   // ===============================================
   socket.on("playerUpdate", (data) => {
-    if (rooms[data.roomID] && rooms[data.roomID].players[socket.id]) {
-      const player = rooms[data.roomID].players[socket.id];
-      const room = rooms[data.roomID];
+    // FIX 1: Check both property names
+    const rID = data.roomId || data.roomID;
+
+    if (rooms[rID] && rooms[rID].players[socket.id]) {
+      const player = rooms[rID].players[socket.id];
+      const room = rooms[rID];
       const isCountdown = Date.now() < room.gameStartTime;
 
       if (!isCountdown) {
-        // Simple smoothing
-        player.x = data.x;
-        player.y = data.y;
+        // FIX 2: Trust Client Position (Unless knocked back)
+        // Only ignore client if server is applying heavy force (vx/vy > 1)
+        if (Math.abs(player.vx) < 1 && Math.abs(player.vy) < 1) {
+             player.x = data.x;
+             player.y = data.y;
+        }
       }
       player.angle = data.angle;
     }
@@ -415,7 +391,10 @@ io.on("connection", (socket) => {
   //  SHOOTING & ABILITIES
   // ===============================================
   socket.on("playerShoot", (data) => {
-    const room = rooms[data.roomID];
+    // FIX 3: Check both property names
+    const rID = data.roomId || data.roomID;
+    const room = rooms[rID];
+
     if (!room || !room.players[socket.id]) return;
 
     if (Date.now() < room.gameStartTime) return;
@@ -436,14 +415,14 @@ io.on("connection", (socket) => {
         const dashPower = 30;
         p.vx = Math.cos(p.angle) * dashPower;
         p.vy = Math.sin(p.angle) * dashPower;
-
         p.speedMult = DASH_MULTIPLIER;
+        
         io.to(room.id).emit("applyBuff", {
           id: socket.id, type: "speed", val: p.speedMult, duration: DASH_DURATION,
         });
 
         setTimeout(() => {
-          if (rooms[data.roomID]?.players[socket.id]) p.speedMult = 1.0;
+          if (rooms[rID]?.players[socket.id]) p.speedMult = 1.0;
         }, DASH_DURATION);
 
         cdTime = COOLDOWNS.dash;
@@ -451,15 +430,14 @@ io.on("connection", (socket) => {
       else if (utilType === "shield") {
         p.shield = true;
         cdTime = 0;
-        // Auto-expire shield
         setTimeout(() => {
-          if (rooms[data.roomID]?.players[socket.id]?.shield) {
-            rooms[data.roomID].players[socket.id].shield = false;
-            rooms[data.roomID].players[socket.id].cooldowns.utility = Date.now() + COOLDOWNS.shield;
-            io.to(data.roomID).emit("cooldownUpdate", {
-              id: socket.id, cooldowns: rooms[data.roomID].players[socket.id].cooldowns,
+          if (rooms[rID]?.players[socket.id]?.shield) {
+            rooms[rID].players[socket.id].shield = false;
+            rooms[rID].players[socket.id].cooldowns.utility = Date.now() + COOLDOWNS.shield;
+            io.to(rID).emit("cooldownUpdate", {
+              id: socket.id, cooldowns: rooms[rID].players[socket.id].cooldowns,
             });
-            io.to(data.roomID).emit("opponentUpdate", { id: socket.id, shield: false });
+            io.to(rID).emit("opponentUpdate", { id: socket.id, shield: false });
           }
         }, SHIELD_DURATION);
       } 
@@ -467,7 +445,7 @@ io.on("connection", (socket) => {
         p.invisible = true;
         cdTime = COOLDOWNS.cloak;
         setTimeout(() => {
-          if (rooms[data.roomID]?.players[socket.id]) p.invisible = false;
+          if (rooms[rID]?.players[socket.id]) p.invisible = false;
         }, CLOAK_DURATION);
       } 
       else if (utilType === "repulse") {
@@ -485,9 +463,11 @@ io.on("connection", (socket) => {
           if (dist < 400) {
             const angle = Math.atan2(dy, dx);
             const force = 80;
+            // Force Update on Enemy
             enemy.vx = Math.cos(angle) * force;
             enemy.vy = Math.sin(angle) * force;
             enemy.repulseEndTime = Date.now() + REPULSE_DURATION;
+            
             io.to(pid).emit("forcePush", { angle: angle, force: 30 });
             hitAnyone = true;
           }
@@ -575,7 +555,7 @@ io.on("connection", (socket) => {
   });
 
   // ===============================================
-  //  SMART DISCONNECT (Fixed to use disconnectTimers)
+  //  SMART DISCONNECT
   // ===============================================
   socket.on("disconnect", () => {
     waitingPlayers = waitingPlayers.filter(s => s.id !== socket.id);
@@ -599,17 +579,13 @@ io.on("connection", (socket) => {
     const activePlayers = Object.values(room.players).filter(p => p.connected).length;
 
     if (activePlayers === 0) {
-      // Room empty
       console.log(`[ROOM] Room ${roomId} is empty. Deleting.`);
       delete rooms[roomId];
     } else {
-      // Opponent still there
       console.log(`[ROOM] Room ${roomId} waiting for reconnect.`);
       io.to(roomId).emit("opponentStatus", { status: "disconnected", id: socket.id });
 
-      // STORE THE TIMER SO WE CAN CANCEL IT ON REJOIN
       disconnectTimers[socket.id] = setTimeout(() => {
-        // Re-check existence
         if (rooms[roomId] && rooms[roomId].players[socket.id]) {
           if (rooms[roomId].players[socket.id].connected === false) {
             console.log(`[TIMEOUT] Player ${socket.id} did not return. Ending game.`);
@@ -617,7 +593,7 @@ io.on("connection", (socket) => {
             endGame(roomId, "opponent_disconnect", winnerId, socket.id);
           }
         }
-      }, 30000); // 30 Seconds
+      }, 30000); 
     }
   });
 
@@ -642,7 +618,7 @@ function broadcastRoomState(room) {
   const p1 = room.players[playerIds[0]];
   const p2 = room.players[playerIds[1]];
 
-  // Send Opponent Data
+  // Send Opponent Data (We ALWAYS want to see where the opponent is)
   io.to(playerIds[1]).emit("opponentUpdate", {
     x: p1.x, y: p1.y, vx: p1.vx, vy: p1.vy,
     angle: p1.angle, invisible: p1.invisible, shield: p1.shield,
@@ -652,23 +628,39 @@ function broadcastRoomState(room) {
     angle: p2.angle, invisible: p2.invisible, shield: p2.shield,
   });
 
-  // Send Self Correction
+  // FIX 4: Self Update Strategy
+  // Only send X/Y correction if the player has High Server Velocity (e.g. they got dashed/knocked back)
+  // Otherwise, send null X/Y so the client continues smooth prediction
+  
+  const p1Force = Math.abs(p1.vx) > 0.1 || Math.abs(p1.vy) > 0.1;
+  const p2Force = Math.abs(p2.vx) > 0.1 || Math.abs(p2.vy) > 0.1;
+
   io.to(playerIds[0]).emit("selfUpdate", {
-    x: p1.x, y: p1.y, vx: p1.vx, vy: p1.vy, hp: p1.hp,
+    x: p1Force ? p1.x : null, 
+    y: p1Force ? p1.y : null, 
+    vx: p1.vx, vy: p1.vy, hp: p1.hp,
   });
+  
   io.to(playerIds[1]).emit("selfUpdate", {
-    x: p2.x, y: p2.y, vx: p2.vx, vy: p2.vy, hp: p2.hp,
+    x: p2Force ? p2.x : null, 
+    y: p2Force ? p2.y : null, 
+    vx: p2.vx, vy: p2.vy, hp: p2.hp,
   });
 }
 
 function updateRoom(room) {
-  // FREEZE GAME IF COUNTDOWN IS RUNNING
   if (Date.now() < room.gameStartTime) {
     Object.values(room.players).forEach((p) => {
       p.vx = 0;
       p.vy = 0;
     });
-    if (room.tickCount % 10 === 0) broadcastRoomState(room);
+    // While in countdown, we DO enforce positions
+    if (room.tickCount % 10 === 0) {
+        Object.keys(room.players).forEach(pid => {
+            const p = room.players[pid];
+            io.to(pid).emit("selfUpdate", { x: p.x, y: p.y, hp: p.hp });
+        });
+    }
     room.tickCount++;
     return;
   }
@@ -685,22 +677,21 @@ function updateRoom(room) {
   playerIds.forEach((pid) => {
     const p = room.players[pid];
 
+    // FIX 5: Only apply server physics if there is VELOCITY (knockback/dash)
+    // If vx/vy is 0, we trust the client's direct X/Y updates
     if (Math.abs(p.vx) > 0.1 || Math.abs(p.vy) > 0.1) {
-      // --- PINBALL PHYSICS CHECK ---
+      
       const isPinball = p.repulseEndTime && p.repulseEndTime > now;
 
-      // Determine Friction
+      // Friction
       let friction = 0.92; 
       if (isPinball) friction = 1.0; 
 
-      // Determine Wall Bounce
+      // Wall Bounce
       let wallBounce = -0.5; 
       if (isPinball) wallBounce = -1.0; 
 
-      // Adaptive Network Rate
-      if (Math.abs(p.vx) > 2 || Math.abs(p.vy) > 2) {
-        highVelocityActive = true;
-      }
+      highVelocityActive = true;
 
       p.x += p.vx;
       p.y += p.vy;
@@ -733,7 +724,6 @@ function updateRoom(room) {
     }
   });
 
-  // Send updates
   const shouldBroadcast =
     highVelocityActive || room.tickCount % BROADCAST_RATE === 0;
 
@@ -746,7 +736,6 @@ function updateRoom(room) {
 
   let bulletsToRemove = [];
   room.bullets.forEach((b) => {
-    // Move Projectiles
     if (!b.isMine) {
       b.x += Math.cos(b.angle) * b.speed;
       b.y += Math.sin(b.angle) * b.speed;
@@ -765,9 +754,7 @@ function updateRoom(room) {
 
     for (const playerId in room.players) {
       const player = room.players[playerId];
-      // Skip self unless it's a mine that has primed (traveled > 500)
       if (playerId === b.ownerId && (!b.isMine || b.traveled < 500)) continue;
-      // Skip if already hit (pierce logic)
       if (b.pierce && b.hitList && b.hitList.includes(playerId)) continue;
 
       if (getDistance(b, player) < PLAYER_RADIUS + 6) {
@@ -792,7 +779,7 @@ function updateRoom(room) {
           player.lastDamageTime = Date.now();
 
           if (b.explosive) {
-            io.to(room.id).emit("visualEffect", { type: "hit", x: b.x, y: b.y }); // Hit effect
+            io.to(room.id).emit("visualEffect", { type: "hit", x: b.x, y: b.y }); 
             for (const targetId in room.players) {
               if (targetId === b.ownerId) continue;
               const target = room.players[targetId];
@@ -846,7 +833,6 @@ function findRoomAndEnd(socketId, reason, winnerId) {
 
 function endGame(roomId, reason, winnerId, loserId) {
   if (rooms[roomId]) {
-    // Clear any pending timers for this room
     Object.keys(rooms[roomId].players).forEach((pid) => {
       if (disconnectTimers[pid]) {
         clearTimeout(disconnectTimers[pid]);
