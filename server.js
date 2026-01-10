@@ -398,7 +398,25 @@ io.on('connection', (socket) => {
             socket.emit('rejoinFailed');
         }
     });
+// --- FORFEIT MATCH (New Logic) ---
+    socket.on('forfeitMatch', () => {
+        // 1. Find the room
+        let targetRoomId = null;
+        for (const rID in rooms) {
+            if (rooms[rID].players[socket.id]) {
+                targetRoomId = rID;
+                break;
+            }
+        }
 
+        if (targetRoomId) {
+            // 2. Determine Winner (The Opponent)
+            const winnerId = Object.keys(rooms[targetRoomId].players).find(id => id !== socket.id);
+            
+            // 3. End Game
+            endGame(targetRoomId, 'forfeit', winnerId, socket.id);
+        }
+    });
     // --- EXPLICIT LEAVE (The "Abandon" Button) ---
     socket.on('leaveGame', () => {
         // If client clicks "Abandon", we treat it as a forfeit
