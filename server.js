@@ -591,62 +591,61 @@ io.on("connection", (socket) => {
     findRoomAndEnd(socket.id, "forfeit", null);
   });
 
+  // ===============================================
+  //  SMART DISCONNECT (Checks player count first)
+  // ===============================================
   socket.on("disconnect", () => {
-    if (waitingPlayer && waitingPlayer.id === socket.id) {
-      waitingPlayer = null;
-      return;
-    }
-
-    let targetRoomId = null;
+    // 1. Find the room
+    let roomId = null;
     for (const rID in rooms) {
       if (rooms[rID].players[socket.id]) {
-        targetRoomId = rID;
+        roomId = rID;
         break;
       }
     }
 
-    if (targetRoomId) {
-      const room = rooms[targetRoomId];
+    if (!roomId) return; // Player wasn't in a game
 
-      io.to(targetRoomId).emit("opponentDisconnected", { id: socket.id });
+    const room = rooms[roomId];
+    const player = room.players[socket.id];
 
-      disconnectTimers[socket.id] = setInterval(() => {
-        if (!rooms[targetRoomId]) {
-          clearInterval(disconnectTimers[socket.id]);
-          return;
-        }
-        const player = rooms[targetRoomId].players[socket.id];
-        if (player) {
-          player.hp -= 5;
-          io.to(targetRoomId).emit("playerDamage", {
-            id: socket.id,
-            hp: player.hp,
-          });
-          if (player.hp <= 0) {
-            const winnerId = Object.keys(rooms[targetRoomId].players).find(
-              (id) => id !== socket.id
-            );
-            endGame(targetRoomId, "opponent_disconnect", winnerId, socket.id);
+    console.log(`[DISCONNECT] Player ${socket.id} disconnected from Room ${roomId}`);
+
+    // 2. Mark this specific player as disconnected
+    player.connected = false;
+
+    // 3. Count how many players are arguably still "there"
+    // (We check if there is anyone left with connected: true)
+    const activePlayers = Object.values(room.players).filter(p => p.connected).length;
+
+    if (activePlayers === 0) {
+      // SCENARIO A: Everyone is gone.
+      // If the last person leaves, we can safely close the room to save memory.
+      // (Forfeit is irrelevant here because there is no one to win)
+      console.log(`[ROOM] Room ${roomId} is empty. Deleting immediately.`);
+      delete rooms[roomId];
+    } else {
+      // SCENARIO B: Someone is still in the room!
+      // DO NOT DELETE THE ROOM. 
+      console.log(`[ROOM] Room ${roomId} still has ${activePlayers} player(s). Keeping open.`);
+
+      // Notify the survivor that their opponent is gone (optional: adds polish)
+      io.to(roomId).emit("opponentStatus", { status: "disconnected", id: socket.id });
+
+      // Start the "Bleed Out" timer (30 seconds)
+      // If the disconnected player doesn't return or forfeit in 30s, the survivor wins.
+      setTimeout(() => {
+        // Re-check: Is the room still there? Is the player still gone?
+        if (rooms[roomId] && rooms[roomId].players[socket.id]) {
+          if (rooms[roomId].players[socket.id].connected === false) {
+            console.log(`[TIMEOUT] Player ${socket.id} did not return. Ending game.`);
+            
+            // The person who stayed is the winner
+            const winnerId = Object.keys(rooms[roomId].players).find(id => id !== socket.id);
+            endGame(roomId, "opponent_disconnect", winnerId, socket.id);
           }
-        } else {
-          clearInterval(disconnectTimers[socket.id]);
         }
-      }, 1000);
-
-      const totalPlayers = Object.keys(room.players).length;
-      const disconnectedPlayers = Object.keys(disconnectTimers).filter(
-        (id) => room.players[id]
-      ).length;
-
-      if (disconnectedPlayers >= totalPlayers) {
-        Object.keys(room.players).forEach((pid) => {
-          if (disconnectTimers[pid]) {
-            clearInterval(disconnectTimers[pid]);
-            delete disconnectTimers[pid];
-          }
-        });
-        delete rooms[targetRoomId];
-      }
+      }, 30000); 
     }
   });
 
