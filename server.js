@@ -24,12 +24,10 @@ const BROADCAST_RATE = 2; // Normal State: Send updates every 2 ticks (30Hz)
 
 const MAP_WIDTH = 1920;
 const MAP_HEIGHT = 1080;
-const BASE_HP = 100;
 const PLAYER_RADIUS = 30;
 const COUNTDOWN_TIME = 3000; // 3 Seconds before game starts
 
 // --- ABILITY CONSTANTS ---
-
 const DASH_DURATION = 500;
 const DASH_MULTIPLIER = 2.5;
 const CLOAK_DURATION = 5000;
@@ -154,7 +152,7 @@ const WEAPONS = {
 // 4. STATE MANAGEMENT
 // ==================================================================
 let rooms = {};
-let waitingPlayer = null;
+let waitingPlayers = []; // Corrected: waitingPlayers was declared as waitingPlayer (singular) in your snippet, switched to array
 let disconnectTimers = {};
 
 function getDistance(a, b) {
@@ -167,9 +165,8 @@ function getDistance(a, b) {
 io.on("connection", (socket) => {
   console.log(`User Connected: ${socket.id}`);
 
-  // --- MATCHMAKING ---
   // ===============================================
-  //  JOIN QUEUE & REJOIN LOGIC
+  //  JOIN QUEUE & REJOIN LOGIC (FIXED)
   // ===============================================
   socket.on("joinQueue", (data) => {
     
@@ -178,13 +175,12 @@ io.on("connection", (socket) => {
       const token = data.token;
       console.log(`[REJOIN] Player ${socket.id} trying to rejoin with token: ${token}`);
 
-      // Search all rooms for this token
       let foundRoomId = null;
       let oldSocketId = null;
 
+      // Find room containing the token
       for (const rID in rooms) {
         const room = rooms[rID];
-        // Find the player in this room who matches the token
         const pID = Object.keys(room.players).find(
           (id) => room.players[id].matchToken === token
         );
@@ -199,20 +195,27 @@ io.on("connection", (socket) => {
       if (foundRoomId && oldSocketId) {
         const room = rooms[foundRoomId];
         
-        // MIGRATE PLAYER DATA TO NEW SOCKET
-        // 1. Copy data from old ID to new ID
-        room.players[socket.id] = room.players[oldSocketId];
-        room.players[socket.id].id = socket.id; // Update internal ID
-        room.players[socket.id].connected = true; // Mark alive
+        // RECOVERY LOGIC:
+        // 1. If the socket ID hasn't changed (rare), just update
+        // 2. If it HAS changed, swap the data to the new ID
         
-        // 2. Delete the old ghost ID
+        const playerData = room.players[oldSocketId];
+
         if (socket.id !== oldSocketId) {
+            // Assign data to new ID
+            room.players[socket.id] = playerData;
+            room.players[socket.id].id = socket.id;
+            // Remove old ID to prevent "ghosts"
             delete room.players[oldSocketId];
         }
 
+        // Mark as connected
+        room.players[socket.id].connected = true;
+
         console.log(`[REJOIN] Success! Swapped ${oldSocketId} for ${socket.id} in Room ${foundRoomId}`);
 
-        // 3. Tell the player they are back in
+        // Notify Client
+        socket.join(foundRoomId);
         socket.emit("matchFound", {
           roomId: foundRoomId,
           playerId: socket.id,
@@ -220,28 +223,33 @@ io.on("connection", (socket) => {
           matchToken: token
         });
 
-        // 4. Notify the opponent that the player returned!
+        // Notify Opponent (So they know to resume)
         socket.to(foundRoomId).emit("opponentStatus", { status: "reconnected", id: socket.id });
         
-        return; // Stop here, don't add to normal queue
+        return; 
       } else {
-        console.log(`[REJOIN] Failed. Token ${token} not found in active rooms.`);
+        console.log(`[REJOIN] Failed. Token ${token} not found.`);
         socket.emit("matchError", "Match Expired or Invalid");
-        // Don't return, let them fall through to normal queue if you want, 
-        // OR return to force them to click "Find Match" again.
         return; 
       }
     }
 
     // --- 2. NORMAL QUEUE LOGIC (No token / New Game) ---
+    
+    // Check if already in queue to prevent duplicates
+    if (waitingPlayers.some(s => s.id === socket.id)) return;
+
     console.log(`[QUEUE] Player ${socket.id} joined queue`);
     waitingPlayers.push(socket);
+
+    // Filter out disconnected people from queue before matching
+    waitingPlayers = waitingPlayers.filter(s => s.connected);
 
     if (waitingPlayers.length >= 2) {
       const p1 = waitingPlayers.shift();
       const p2 = waitingPlayers.shift();
 
-      // Check if they are still connected
+      // Double check connection status
       if (!p1.connected || !p2.connected) {
          if (p1.connected) waitingPlayers.unshift(p1);
          if (p2.connected) waitingPlayers.unshift(p2);
@@ -250,23 +258,26 @@ io.on("connection", (socket) => {
 
       const roomId = `room_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
       
-      // Create Tokens
       const token1 = `token_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
       const token2 = `token_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
       rooms[roomId] = {
         id: roomId,
+        gameStartTime: Date.now() + COUNTDOWN_TIME, // Use constant
         players: {
           [p1.id]: { 
             id: p1.id, x: 100, y: 100, hp: 100, maxHp: 100, 
-            color: "red", score: 0, connected: true, matchToken: token1 
+            color: "red", score: 0, connected: true, matchToken: token1,
+            cooldowns: {}, angle: 0, vx: 0, vy: 0 
           },
           [p2.id]: { 
-            id: p2.id, x: 700, y: 500, hp: 100, maxHp: 100, 
-            color: "blue", score: 0, connected: true, matchToken: token2 
+            id: p2.id, x: 1820, y: 980, hp: 100, maxHp: 100, 
+            color: "blue", score: 0, connected: true, matchToken: token2,
+            cooldowns: {}, angle: 0, vx: 0, vy: 0
           },
         },
         bullets: [],
+        tickCount: 0,
         lastUpdate: Date.now(),
       };
 
@@ -279,10 +290,57 @@ io.on("connection", (socket) => {
       console.log(`[MATCH] Created Room ${roomId} for ${p1.id} vs ${p2.id}`);
     }
   });
-  // ================================================
-  // PASTE THIS BETWEEN 'joinQueue' AND 'disconnect'
-  // ================================================
 
+  // ===============================================
+  //  REJOIN GAME (Explicit Handler)
+  // ===============================================
+  socket.on("rejoinGame", (data) => {
+    // Redirect to the logic inside joinQueue to keep it centralized, 
+    // or we can handle it here. Let's reuse the logic via a fake call 
+    // or just copy the logic. For safety, I'll copy the robust logic here.
+    const token = data.token;
+    let foundRoomId = null;
+    let oldSocketId = null;
+
+    for (const rID in rooms) {
+      const room = rooms[rID];
+      const pID = Object.keys(room.players).find(
+        (id) => room.players[id].matchToken === token
+      );
+      if (pID) {
+        foundRoomId = rID;
+        oldSocketId = pID;
+        break;
+      }
+    }
+
+    if (foundRoomId && oldSocketId) {
+       const room = rooms[foundRoomId];
+       const pData = room.players[oldSocketId];
+
+       if (socket.id !== oldSocketId) {
+          room.players[socket.id] = pData;
+          room.players[socket.id].id = socket.id;
+          delete room.players[oldSocketId];
+       }
+       room.players[socket.id].connected = true;
+       socket.join(foundRoomId);
+       
+       socket.emit("rejoinSuccess", {
+          roomID: foundRoomId,
+          me: room.players[socket.id],
+          players: room.players
+       });
+       io.to(foundRoomId).emit("opponentStatus", { status: "reconnected", id: socket.id });
+    } else {
+       socket.emit("rejoinFailed");
+    }
+  });
+
+
+  // ===============================================
+  // FORFEIT LOGIC
+  // ===============================================
   socket.on("forfeitMatch", (data) => {
     // 1. SCENARIO: Forfeit via Token (Reloaded / Rejoin Popup)
     if (data && data.matchToken) {
@@ -292,13 +350,11 @@ io.on("connection", (socket) => {
       let targetRoomId = null;
       let forfeiterId = null; 
 
-      // Find the room that contains this token
       for (const rID in rooms) {
         const room = rooms[rID];
         const pID = Object.keys(room.players).find(
           (id) => room.players[id].matchToken === token
         );
-        
         if (pID) {
           targetRoomId = rID;
           forfeiterId = pID; 
@@ -307,13 +363,10 @@ io.on("connection", (socket) => {
       }
 
       if (targetRoomId && forfeiterId) {
-        // Winner is the person who isn't the forfeiter
         const winnerId = Object.keys(rooms[targetRoomId].players).find(
           (id) => id !== forfeiterId
         );
         endGame(targetRoomId, "forfeit", winnerId, forfeiterId);
-      } else {
-        console.log(`[FORFEIT] Token ${token} not found in any active room.`);
       }
       return; 
     }
@@ -334,7 +387,10 @@ io.on("connection", (socket) => {
       endGame(targetRoomId, "forfeit", winnerId, socket.id);
     }
   });
-  // --- MOVEMENT ---
+
+  // ===============================================
+  //  MOVEMENT
+  // ===============================================
   socket.on("playerUpdate", (data) => {
     if (rooms[data.roomID] && rooms[data.roomID].players[socket.id]) {
       const player = rooms[data.roomID].players[socket.id];
@@ -349,7 +405,9 @@ io.on("connection", (socket) => {
     }
   });
 
-  // --- SHOOTING & ABILITIES ---
+  // ===============================================
+  //  SHOOTING & ABILITIES (YOUR CUSTOM LOGIC)
+  // ===============================================
   socket.on("playerShoot", (data) => {
     const room = rooms[data.roomID];
     if (!room || !room.players[socket.id]) return;
@@ -360,11 +418,13 @@ io.on("connection", (socket) => {
     const now = Date.now();
     const slot = data.slot;
 
+    // Ensure cooldowns object exists
+    if (!p.cooldowns) p.cooldowns = {};
     if (p.cooldowns[slot] > now) return;
 
     // UTILITY LOGIC
     if (slot === "utility") {
-      const utilType = p.utility;
+      const utilType = p.utility || "dash"; // Fallback to dash if undefined
       let cdTime = 0;
 
       if (utilType === "dash") {
@@ -454,7 +514,8 @@ io.on("connection", (socket) => {
     }
 
     const weaponKey = slot === "primary" ? p.primary : p.secondary;
-    const stats = WEAPONS[weaponKey];
+    // Safety check if weaponKey is missing
+    const stats = WEAPONS[weaponKey] || WEAPONS["pulse"];
 
     let actualCD = stats.cooldown;
     if (p.perk === "haste") actualCD *= 0.85;
@@ -524,58 +585,11 @@ io.on("connection", (socket) => {
     });
   });
 
-  // --- RECONNECT / DISCONNECT ---
+  // --- RECONNECT / DISCONNECT / LEAVE ---
   socket.on("abandonMatch", () => {
     findRoomAndEnd(socket.id, "draw", null);
   });
-
-  socket.on("rejoinGame", (data) => {
-    const { token } = data;
-    let foundRoom = null;
-    let oldSocketID = null;
-
-    for (const rID in rooms) {
-      if (rooms[rID].matchToken === token) {
-        foundRoom = rooms[rID];
-        break;
-      }
-    }
-
-    if (foundRoom) {
-      oldSocketID = Object.keys(foundRoom.players).find(
-        (pid) => disconnectTimers[pid]
-      );
-
-      if (oldSocketID) {
-        clearInterval(disconnectTimers[oldSocketID]);
-        delete disconnectTimers[oldSocketID];
-
-        const pData = foundRoom.players[oldSocketID];
-        delete foundRoom.players[oldSocketID];
-
-        pData.id = socket.id;
-        foundRoom.players[socket.id] = pData;
-
-        socket.join(foundRoom.id);
-
-        socket.emit("rejoinSuccess", {
-          roomID: foundRoom.id,
-          me: pData,
-          players: foundRoom.players,
-        });
-
-        io.to(foundRoom.id).emit("matchResumed", { reconnectedId: socket.id });
-        console.log(`Player reconnected to ${foundRoom.id}`);
-      } else {
-        socket.emit("rejoinFailed");
-      }
-    } else {
-      socket.emit("rejoinFailed");
-    }
-  });
-
   
-
   socket.on("leaveGame", () => {
     findRoomAndEnd(socket.id, "forfeit", null);
   });
@@ -584,6 +598,9 @@ io.on("connection", (socket) => {
   //  SMART DISCONNECT (Checks player count first)
   // ===============================================
   socket.on("disconnect", () => {
+    // 0. Remove from Queue if they are waiting
+    waitingPlayers = waitingPlayers.filter(s => s.id !== socket.id);
+
     // 1. Find the room
     let roomId = null;
     for (const rID in rooms) {
@@ -596,33 +613,30 @@ io.on("connection", (socket) => {
     if (!roomId) return; // Player wasn't in a game
 
     const room = rooms[roomId];
-    const player = room.players[socket.id];
+    
+    // Safety check: Make sure player object exists
+    if (!room.players[socket.id]) return;
 
     console.log(`[DISCONNECT] Player ${socket.id} disconnected from Room ${roomId}`);
 
     // 2. Mark this specific player as disconnected
-    player.connected = false;
+    room.players[socket.id].connected = false;
 
     // 3. Count how many players are arguably still "there"
-    // (We check if there is anyone left with connected: true)
     const activePlayers = Object.values(room.players).filter(p => p.connected).length;
 
     if (activePlayers === 0) {
       // SCENARIO A: Everyone is gone.
-      // If the last person leaves, we can safely close the room to save memory.
-      // (Forfeit is irrelevant here because there is no one to win)
       console.log(`[ROOM] Room ${roomId} is empty. Deleting immediately.`);
       delete rooms[roomId];
     } else {
       // SCENARIO B: Someone is still in the room!
-      // DO NOT DELETE THE ROOM. 
       console.log(`[ROOM] Room ${roomId} still has ${activePlayers} player(s). Keeping open.`);
 
-      // Notify the survivor that their opponent is gone (optional: adds polish)
+      // Notify the survivor that their opponent is gone
       io.to(roomId).emit("opponentStatus", { status: "disconnected", id: socket.id });
 
       // Start the "Bleed Out" timer (30 seconds)
-      // If the disconnected player doesn't return or forfeit in 30s, the survivor wins.
       setTimeout(() => {
         // Re-check: Is the room still there? Is the player still gone?
         if (rooms[roomId] && rooms[roomId].players[socket.id]) {
@@ -642,6 +656,7 @@ io.on("connection", (socket) => {
     if (typeof cb === "function") cb();
   });
 });
+
 // ==================================================================
 // 6. GAME LOOP (PHYSICS & REGEN)
 // ==================================================================
@@ -660,50 +675,30 @@ function broadcastRoomState(room) {
 
   // Send Opponent Data
   io.to(playerIds[1]).emit("opponentUpdate", {
-    x: p1.x,
-    y: p1.y,
-    vx: p1.vx,
-    vy: p1.vy,
-    angle: p1.angle,
-    invisible: p1.invisible,
-    shield: p1.shield,
+    x: p1.x, y: p1.y, vx: p1.vx, vy: p1.vy,
+    angle: p1.angle, invisible: p1.invisible, shield: p1.shield,
   });
   io.to(playerIds[0]).emit("opponentUpdate", {
-    x: p2.x,
-    y: p2.y,
-    vx: p2.vx,
-    vy: p2.vy,
-    angle: p2.angle,
-    invisible: p2.invisible,
-    shield: p2.shield,
+    x: p2.x, y: p2.y, vx: p2.vx, vy: p2.vy,
+    angle: p2.angle, invisible: p2.invisible, shield: p2.shield,
   });
 
-  // Send Self Correction (Crucial for Knockback syncing)
+  // Send Self Correction
   io.to(playerIds[0]).emit("selfUpdate", {
-    x: p1.x,
-    y: p1.y,
-    vx: p1.vx,
-    vy: p1.vy,
-    hp: p1.hp,
+    x: p1.x, y: p1.y, vx: p1.vx, vy: p1.vy, hp: p1.hp,
   });
   io.to(playerIds[1]).emit("selfUpdate", {
-    x: p2.x,
-    y: p2.y,
-    vx: p2.vx,
-    vy: p2.vy,
-    hp: p2.hp,
+    x: p2.x, y: p2.y, vx: p2.vx, vy: p2.vy, hp: p2.hp,
   });
 }
 
 function updateRoom(room) {
   // NEW: FREEZE GAME IF COUNTDOWN IS RUNNING
   if (Date.now() < room.gameStartTime) {
-    // Enforce 0 velocity on server side to prevent cheating before start
     Object.values(room.players).forEach((p) => {
       p.vx = 0;
       p.vy = 0;
     });
-    // Broadcast this frozen state so clients snap to spawn
     if (room.tickCount % 10 === 0) broadcastRoomState(room);
     room.tickCount++;
     return;
@@ -727,13 +722,13 @@ function updateRoom(room) {
 
       // Determine Friction
       let friction = 0.92; // Standard Floor friction
-      if (isPinball) friction = 1.0; // ZERO Friction (slides forever)
+      if (isPinball) friction = 1.0; // ZERO Friction
 
       // Determine Wall Bounce
       let wallBounce = -0.5; // Standard 'dull' bounce
-      if (isPinball) wallBounce = -1.0; // PERFECT BOUNCE (Keeps all speed)
+      if (isPinball) wallBounce = -1.0; // PERFECT BOUNCE
 
-      // Adaptive Network Rate: If flying fast, force updates
+      // Adaptive Network Rate
       if (Math.abs(p.vx) > 2 || Math.abs(p.vy) > 2) {
         highVelocityActive = true;
       }
@@ -744,13 +739,12 @@ function updateRoom(room) {
       p.vx *= friction;
       p.vy *= friction;
 
-      // Stop if too slow (only if not in pinball mode)
       if (!isPinball) {
         if (Math.abs(p.vx) < 0.1) p.vx = 0;
         if (Math.abs(p.vy) < 0.1) p.vy = 0;
       }
 
-      // Map Boundaries (With Dynamic Bounce)
+      // Map Boundaries
       if (p.x < PLAYER_RADIUS) {
         p.x = PLAYER_RADIUS;
         p.vx *= wallBounce;
@@ -770,7 +764,7 @@ function updateRoom(room) {
     }
   });
 
-  // Send updates every 2nd tick (30Hz), UNLESS high speed event (60Hz)
+  // Send updates
   const shouldBroadcast =
     highVelocityActive || room.tickCount % BROADCAST_RATE === 0;
 
@@ -804,12 +798,17 @@ function updateRoom(room) {
 
     for (const playerId in room.players) {
       const player = room.players[playerId];
+      // Skip self unless it's a mine that has primed (traveled > 500)
       if (playerId === b.ownerId && (!b.isMine || b.traveled < 500)) continue;
-      if (b.pierce && b.hitList.includes(playerId)) continue;
+      // Skip if already hit (pierce logic)
+      if (b.pierce && b.hitList && b.hitList.includes(playerId)) continue;
 
       if (getDistance(b, player) < PLAYER_RADIUS + 6) {
         if (player.shield) {
           player.shield = false;
+          // Ensure cooldowns exist
+          if(!player.cooldowns) player.cooldowns = {};
+          
           player.cooldowns.utility = Date.now() + COOLDOWNS.shield;
           io.to(room.id).emit("visualEffect", {
             type: "shieldBreak",
@@ -853,6 +852,7 @@ function updateRoom(room) {
           }
 
           if (b.pierce) {
+            if(!b.hitList) b.hitList = [];
             b.hitList.push(playerId);
           } else {
             bulletsToRemove.push(b.id);
@@ -884,12 +884,14 @@ function findRoomAndEnd(socketId, reason, winnerId) {
 
 function endGame(roomId, reason, winnerId, loserId) {
   if (rooms[roomId]) {
+    // Clear any pending timers for this room
     Object.keys(rooms[roomId].players).forEach((pid) => {
       if (disconnectTimers[pid]) {
         clearInterval(disconnectTimers[pid]);
         delete disconnectTimers[pid];
       }
     });
+
     if (!loserId && winnerId) {
       loserId = Object.keys(rooms[roomId].players).find(
         (id) => id !== winnerId
@@ -900,6 +902,7 @@ function endGame(roomId, reason, winnerId, loserId) {
       winnerId: winnerId,
       loserId: loserId,
     });
+    console.log(`[GAME OVER] Room ${roomId} ended. Reason: ${reason}`);
     delete rooms[roomId];
   }
 }
