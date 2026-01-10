@@ -290,7 +290,61 @@ io.on("connection", (socket) => {
       };
     }
   });
+  // ================================================
+  // PASTE THIS BETWEEN 'joinQueue' AND 'disconnect'
+  // ================================================
 
+  socket.on("forfeitMatch", (data) => {
+    // 1. SCENARIO: Forfeit via Token (Reloaded / Rejoin Popup)
+    if (data && data.matchToken) {
+      const token = data.matchToken;
+      console.log(`[FORFEIT] Server received Token: ${token}`);
+
+      let targetRoomId = null;
+      let forfeiterId = null; 
+
+      // Find the room that contains this token
+      for (const rID in rooms) {
+        const room = rooms[rID];
+        const pID = Object.keys(room.players).find(
+          (id) => room.players[id].matchToken === token
+        );
+        
+        if (pID) {
+          targetRoomId = rID;
+          forfeiterId = pID; 
+          break;
+        }
+      }
+
+      if (targetRoomId && forfeiterId) {
+        // Winner is the person who isn't the forfeiter
+        const winnerId = Object.keys(rooms[targetRoomId].players).find(
+          (id) => id !== forfeiterId
+        );
+        endGame(targetRoomId, "forfeit", winnerId, forfeiterId);
+      } else {
+        console.log(`[FORFEIT] Token ${token} not found in any active room.`);
+      }
+      return; 
+    }
+
+    // 2. SCENARIO: Forfeit In-Game (Socket ID is valid)
+    let targetRoomId = null;
+    for (const rID in rooms) {
+      if (rooms[rID].players[socket.id]) {
+        targetRoomId = rID;
+        break;
+      }
+    }
+
+    if (targetRoomId) {
+      const winnerId = Object.keys(rooms[targetRoomId].players).find(
+        (id) => id !== socket.id
+      );
+      endGame(targetRoomId, "forfeit", winnerId, socket.id);
+    }
+  });
   // --- MOVEMENT ---
   socket.on("playerUpdate", (data) => {
     if (rooms[data.roomID] && rooms[data.roomID].players[socket.id]) {
@@ -531,68 +585,7 @@ io.on("connection", (socket) => {
     }
   });
 
-  // *** FIXED FORFEIT LOGIC IS HERE ***
-  // Handles both Menu Forfeit (Token based) and In-Game Forfeit (Socket based)
-  // *** FIXED FORFEIT LOGIC ***
-  socket.on("forfeitMatch", (data) => {
-    // SCENARIO 1: Forfeit via Token (Reloaded / Rejoin Popup)
-    if (data && data.matchToken) {
-      const token = data.matchToken;
-      console.log(`[FORFEIT] Received Token: ${token}`);
-
-      let targetRoomId = null;
-      let forfeiterId = null; // The OLD socket ID
-
-      // 1. Find the room that contains this token
-      for (const rID in rooms) {
-        const room = rooms[rID];
-        // Look through all players in this room
-        const pID = Object.keys(room.players).find(
-          (id) => room.players[id].matchToken === token
-        );
-        
-        if (pID) {
-          targetRoomId = rID;
-          forfeiterId = pID; // This is the ID of the player currently in the game (likely the disconnected one)
-          break;
-        }
-      }
-
-      if (targetRoomId && forfeiterId) {
-        console.log(`[FORFEIT] Found room ${targetRoomId}. Forfeiter (Old ID): ${forfeiterId}`);
-        
-        // Find the winner (the person who is NOT the forfeiter)
-        const winnerId = Object.keys(rooms[targetRoomId].players).find(
-          (id) => id !== forfeiterId
-        );
-
-        endGame(targetRoomId, "forfeit", winnerId, forfeiterId);
-      } else {
-        console.log("[FORFEIT] No room found for this token.");
-      }
-      return; 
-    }
-
-    // SCENARIO 2: Forfeit In-Game (Socket ID is still valid)
-    console.log(`[FORFEIT] Request via Active Socket: ${socket.id}`);
-    
-    let targetRoomId = null;
-    for (const rID in rooms) {
-      if (rooms[rID].players[socket.id]) {
-        targetRoomId = rID;
-        break;
-      }
-    }
-
-    if (targetRoomId) {
-      const winnerId = Object.keys(rooms[targetRoomId].players).find(
-        (id) => id !== socket.id
-      );
-      endGame(targetRoomId, "forfeit", winnerId, socket.id);
-    } else {
-      console.log("[FORFEIT] Socket is not in any active room.");
-    }
-  });
+  
 
   socket.on("leaveGame", () => {
     findRoomAndEnd(socket.id, "forfeit", null);
