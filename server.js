@@ -168,126 +168,115 @@ io.on("connection", (socket) => {
   console.log(`User Connected: ${socket.id}`);
 
   // --- MATCHMAKING ---
-  socket.on("joinQueue", (playerData) => {
-    const cleanName = (playerData.username || "Agent")
-      .substring(0, 12)
-      .replace(/[^a-zA-Z0-9 _-]/g, "");
-    const chosenPerk = playerData.perk || "vitality";
+  // ===============================================
+  //  JOIN QUEUE & REJOIN LOGIC
+  // ===============================================
+  socket.on("joinQueue", (data) => {
+    
+    // --- 1. HANDLE REJOIN (Player has a token) ---
+    if (data && data.token) {
+      const token = data.token;
+      console.log(`[REJOIN] Player ${socket.id} trying to rejoin with token: ${token}`);
 
-    // Check Name Uniqueness
-    let nameTaken = false;
-    if (waitingPlayer && waitingPlayer.data.username === cleanName)
-      nameTaken = true;
-    if (!nameTaken) {
+      // Search all rooms for this token
+      let foundRoomId = null;
+      let oldSocketId = null;
+
       for (const rID in rooms) {
-        const players = rooms[rID].players;
-        for (const pID in players) {
-          if (players[pID].username === cleanName) {
-            nameTaken = true;
-            break;
-          }
+        const room = rooms[rID];
+        // Find the player in this room who matches the token
+        const pID = Object.keys(room.players).find(
+          (id) => room.players[id].matchToken === token
+        );
+        
+        if (pID) {
+          foundRoomId = rID;
+          oldSocketId = pID;
+          break;
         }
-        if (nameTaken) break;
+      }
+
+      if (foundRoomId && oldSocketId) {
+        const room = rooms[foundRoomId];
+        
+        // MIGRATE PLAYER DATA TO NEW SOCKET
+        // 1. Copy data from old ID to new ID
+        room.players[socket.id] = room.players[oldSocketId];
+        room.players[socket.id].id = socket.id; // Update internal ID
+        room.players[socket.id].connected = true; // Mark alive
+        
+        // 2. Delete the old ghost ID
+        if (socket.id !== oldSocketId) {
+            delete room.players[oldSocketId];
+        }
+
+        console.log(`[REJOIN] Success! Swapped ${oldSocketId} for ${socket.id} in Room ${foundRoomId}`);
+
+        // 3. Tell the player they are back in
+        socket.emit("matchFound", {
+          roomId: foundRoomId,
+          playerId: socket.id,
+          players: room.players,
+          matchToken: token
+        });
+
+        // 4. Notify the opponent that the player returned!
+        socket.to(foundRoomId).emit("opponentStatus", { status: "reconnected", id: socket.id });
+        
+        return; // Stop here, don't add to normal queue
+      } else {
+        console.log(`[REJOIN] Failed. Token ${token} not found in active rooms.`);
+        socket.emit("matchError", "Match Expired or Invalid");
+        // Don't return, let them fall through to normal queue if you want, 
+        // OR return to force them to click "Find Match" again.
+        return; 
       }
     }
-    if (nameTaken) {
-      socket.emit("queueError", "NAME ALREADY IN USE.");
-      return;
-    }
 
-    const startingHp = chosenPerk === "vitality" ? 125 : BASE_HP;
+    // --- 2. NORMAL QUEUE LOGIC (No token / New Game) ---
+    console.log(`[QUEUE] Player ${socket.id} joined queue`);
+    waitingPlayers.push(socket);
 
-    // Construct Player Object
-    const finalPlayerData = {
-      username: cleanName,
-      perk: chosenPerk,
-      primary: WEAPONS[playerData.primary] ? playerData.primary : "pulse",
-      secondary: WEAPONS[playerData.secondary]
-        ? playerData.secondary
-        : "pistol",
-      utility: playerData.utility || "dash",
-    };
+    if (waitingPlayers.length >= 2) {
+      const p1 = waitingPlayers.shift();
+      const p2 = waitingPlayers.shift();
 
-    const newPlayerState = {
-      ...finalPlayerData,
-      id: socket.id,
-      hp: startingHp,
-      maxHp: startingHp,
-      x: 0,
-      y: 0,
-      angle: 0,
+      // Check if they are still connected
+      if (!p1.connected || !p2.connected) {
+         if (p1.connected) waitingPlayers.unshift(p1);
+         if (p2.connected) waitingPlayers.unshift(p2);
+         return;
+      }
 
-      // PHYSICS VARIABLES
-      vx: 0,
-      vy: 0,
+      const roomId = `room_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      
+      // Create Tokens
+      const token1 = `token_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      const token2 = `token_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
-      // State Tracking
-      lastShootTime: 0,
-      lastDamageTime: 0,
-      cooldowns: { primary: 0, secondary: 0, utility: 0 },
-
-      // Status Flags
-      shield: false,
-      invisible: false,
-      repulseEndTime: 0,
-      speedMult: 1.0,
-    };
-
-    // NOTE: Removed the nested forfeitMatch listener from here
-
-    if (waitingPlayer) {
-      // Match Found
-      const roomID = `room_${Date.now()}`;
-      const p1ID = waitingPlayer.id;
-      const p2ID = socket.id;
-
-      const matchToken = `${roomID}_${Math.random().toString(36).substr(2, 9)}`;
-
-      // Set Spawn Positions
-      const p1State = {
-        ...waitingPlayer.state,
-        id: p1ID,
-        x: 100,
-        y: 540,
-        angle: 0,
-      };
-      const p2State = {
-        ...newPlayerState,
-        id: p2ID,
-        x: 1820,
-        y: 540,
-        angle: Math.PI,
-      };
-
-      rooms[roomID] = {
-        id: roomID,
-        matchToken: matchToken,
-        tickCount: 0,
-        gameStartTime: Date.now() + COUNTDOWN_TIME,
+      rooms[roomId] = {
+        id: roomId,
+        players: {
+          [p1.id]: { 
+            id: p1.id, x: 100, y: 100, hp: 100, maxHp: 100, 
+            color: "red", score: 0, connected: true, matchToken: token1 
+          },
+          [p2.id]: { 
+            id: p2.id, x: 700, y: 500, hp: 100, maxHp: 100, 
+            color: "blue", score: 0, connected: true, matchToken: token2 
+          },
+        },
         bullets: [],
-        players: { [p1ID]: p1State, [p2ID]: p2State },
+        lastUpdate: Date.now(),
       };
 
-      waitingPlayer.socket.join(roomID);
-      socket.join(roomID);
+      p1.join(roomId);
+      p2.join(roomId);
 
-      io.to(roomID).emit("matchFound", {
-        roomID,
-        matchToken,
-        players: rooms[roomID].players,
-      });
+      p1.emit("matchFound", { roomId, playerId: p1.id, players: rooms[roomId].players, matchToken: token1 });
+      p2.emit("matchFound", { roomId, playerId: p2.id, players: rooms[roomId].players, matchToken: token2 });
 
-      io.to(roomID).emit("startCountdown", 3);
-
-      waitingPlayer = null;
-    } else {
-      // Wait in Queue
-      waitingPlayer = {
-        id: socket.id,
-        socket: socket,
-        data: finalPlayerData,
-        state: newPlayerState,
-      };
+      console.log(`[MATCH] Created Room ${roomId} for ${p1.id} vs ${p2.id}`);
     }
   });
   // ================================================
