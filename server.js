@@ -97,7 +97,7 @@ io.on("connection", (socket) => {
         );
 
         if (nameTaken) {
-            socket.emit("queueError", { message: "Username taken. Choose another." });
+            socket.emit("queueError", "Username taken. Choose another.");
             return; // STOP execution here
         }
 
