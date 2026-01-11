@@ -26,7 +26,6 @@ const TICK_RATE = 1000 / 60;
 const MAP_WIDTH = 1920;
 const MAP_HEIGHT = 1080;
 const PLAYER_RADIUS = 30;
-const PLAYER_SPEED = 5;
 const COUNTDOWN_TIME = 3000;
 
 // --- ABILITY CONSTANTS ---
@@ -34,7 +33,6 @@ const DASH_DURATION = 500;
 const DASH_MULTIPLIER = 2.5;
 const CLOAK_DURATION = 5000;
 const SHIELD_DURATION = 10000;
-const REPULSE_DURATION = 700;
 
 const COOLDOWNS = {
     rifle: 200,
@@ -86,10 +84,27 @@ io.on("connection", (socket) => {
     //  JOIN QUEUE
     // ===============================================
     socket.on("joinQueue", (data) => {
-        // 1. SAVE USER DATA
+
+        // 1. DATA SANITIZATION
+        const rawUsername = data.username ? data.username.substring(0, 15) : "Agent";
+        const cleanUsername = rawUsername.trim();
+
+        // 2. CHECK USERNAME UNIQUENESS (The Fix)
+        // Check if anyone in the waiting list already has this name
+        const nameTaken = waitingPlayers.some(p =>
+            p.userData &&
+            p.userData.username.toLowerCase() === cleanUsername.toLowerCase()
+        );
+
+        if (nameTaken) {
+            socket.emit("queueError", { message: "Username taken. Choose another." });
+            return; // STOP execution here
+        }
+
+        // 3. SAVE USER DATA
         if (data) {
             socket.userData = {
-                username: data.username ? data.username.substring(0, 15) : "Agent",
+                username: cleanUsername,
                 perk: data.perk || "vitality",
                 primary: data.primary || "pulse",
                 secondary: data.secondary || "pistol",
@@ -97,7 +112,7 @@ io.on("connection", (socket) => {
             };
         }
 
-        // 2. CHECK FOR REJOIN TOKEN
+        // 4. CHECK FOR REJOIN TOKEN
         if (data && data.token) {
             const token = data.token;
             for (const rID in rooms) {
@@ -114,10 +129,10 @@ io.on("connection", (socket) => {
             }
         }
 
-        // 3. NORMAL QUEUE LOGIC
+        // 5. NORMAL QUEUE LOGIC
         if (waitingPlayers.some(s => s.id === socket.id)) return;
 
-        console.log(`[QUEUE] Player ${socket.id} joined queue`);
+        console.log(`[QUEUE] Player ${socket.id} (${cleanUsername}) joined queue`);
         waitingPlayers.push(socket);
 
         waitingPlayers = waitingPlayers.filter(s => s.connected);
@@ -178,16 +193,14 @@ io.on("connection", (socket) => {
             p1.join(roomId);
             p2.join(roomId);
 
-            // --- FIX: Send BOTH capitalization formats ---
             const roomData = {
                 roomId,
-                roomID: roomId, // <--- Added this extra key
+                roomID: roomId,
                 players: rooms[roomId].players
             };
 
             p1.emit("matchFound", { ...roomData, playerId: p1.id, matchToken: token1 });
             p2.emit("matchFound", { ...roomData, playerId: p2.id, matchToken: token2 });
-            // ---------------------------------------------
 
             console.log(`[MATCH] Created Room ${roomId}`);
         }
@@ -238,7 +251,7 @@ io.on("connection", (socket) => {
 
             sock.emit("rejoinSuccess", {
                 roomId: foundRoomId,
-                roomID: foundRoomId, // <--- Added this extra key
+                roomID: foundRoomId,
                 me: room.players[sock.id],
                 players: room.players
             });
@@ -289,46 +302,39 @@ io.on("connection", (socket) => {
 
 
     // ===============================================
-    //  MOVEMENT & INPUT (FIXED)
+    //  MOVEMENT & INPUT
     // ===============================================
     function handleInput(socket, data) {
-        // 1. Try to get Room ID from data, otherwise find it automatically
         let rID = data.roomId || data.roomID;
 
         if (!rID || !rooms[rID]) {
-            // Search all rooms to find which one this player is in
             rID = Object.keys(rooms).find(id => rooms[id].players[socket.id]);
         }
 
         if (rID && rooms[rID] && rooms[rID].players[socket.id]) {
             const player = rooms[rID].players[socket.id];
 
-            // --- THE FIX: Update Position & Velocity ---
             if (typeof data.x === 'number') player.x = data.x;
             if (typeof data.y === 'number') player.y = data.y;
             if (typeof data.vx === 'number') player.vx = data.vx;
             if (typeof data.vy === 'number') player.vy = data.vy;
 
-            // Update Keys
             if (data.keys) {
                 player.keys = data.keys;
             }
 
-            // Update Aim & State
             if (typeof data.angle !== 'undefined') player.angle = data.angle;
             if (typeof data.shoot !== 'undefined') player.isShooting = data.shoot;
-        } 
+        }
     }
 
-    // Both events now route to the function that handles EVERYTHING
     socket.on("playerUpdate", (data) => handleInput(socket, data));
     socket.on("input", (data) => handleInput(socket, data));
 
     // ===============================================
-    //  SHOOTING & ABILITIES (UPDATED WITH DEBUG)
+    //  SHOOTING & ABILITIES
     // ===============================================
     socket.on("playerShoot", (data) => {
-        // 1. SMART ROOM FINDING (The Fix)
         let rID = data.roomId || data.roomID;
         if (!rID || !rooms[rID]) {
             rID = Object.keys(rooms).find(id => rooms[id].players[socket.id]);
@@ -336,30 +342,21 @@ io.on("connection", (socket) => {
 
         const room = rooms[rID];
 
-        // Safety check
         if (!room || !room.players[socket.id]) {
-            console.log(`[DEBUG_SHOOT_FAIL] No room for ${socket.id}`);
             return;
         }
 
-        // 2. CHECK GAME START
         if (Date.now() < room.gameStartTime) return;
 
         const p = room.players[socket.id];
         const now = Date.now();
-        const slot = data.slot; // "primary", "secondary", or "utility"
+        const slot = data.slot;
 
-        // 3. CHECK COOLDOWNS (AND SYNC CLIENT)
         if (!p.cooldowns) p.cooldowns = {};
         if (p.cooldowns[slot] && p.cooldowns[slot] > now) {
-            console.log(`[DEBUG_COOLDOWN] ${slot} rejected for ${socket.id}. Remaining: ${p.cooldowns[slot] - now}`);
-
-            // KEY FIX: Tell the client exactly what the server thinks the cooldown is
             io.to(rID).emit("cooldownUpdate", { id: socket.id, cooldowns: p.cooldowns });
             return;
         }
-
-        console.log(`[DEBUG_SHOOT] ${socket.id} fired ${slot}`);
 
         // ============================
         // A. UTILITY LOGIC
@@ -386,7 +383,7 @@ io.on("connection", (socket) => {
             }
             else if (utilType === "shield") {
                 p.shield = true;
-                cdTime = 0; // Cooldown starts AFTER shield breaks/ends
+                cdTime = 0;
 
                 setTimeout(() => {
                     if (rooms[rID]?.players[socket.id]?.shield) {
@@ -411,7 +408,6 @@ io.on("connection", (socket) => {
                 cdTime = COOLDOWNS.repulse;
                 io.to(room.id).emit("visualEffect", { type: "repulse", x: p.x, y: p.y });
 
-                let hitAnyone = false;
                 Object.keys(room.players).forEach((pid) => {
                     if (pid === socket.id) return;
                     const enemy = room.players[pid];
@@ -424,14 +420,11 @@ io.on("connection", (socket) => {
                         const force = 80;
                         enemy.vx = Math.cos(angle) * force;
                         enemy.vy = Math.sin(angle) * force;
-
                         io.to(pid).emit("forcePush", { angle: angle, force: 30 });
-                        hitAnyone = true;
                     }
                 });
             }
 
-            // Apply cooldown (Shield handles its own cooldown logic above)
             if (utilType !== "shield") {
                 p.cooldowns.utility = now + cdTime;
             }
@@ -443,13 +436,11 @@ io.on("connection", (socket) => {
         // B. WEAPON LOGIC
         // ============================
 
-        // Shooting breaks invisibility
         if (p.invisible) p.invisible = false;
 
         const weaponKey = slot === "primary" ? p.primary : p.secondary;
         const stats = WEAPONS[weaponKey] || WEAPONS["pulse"];
 
-        // Apply Cooldown (Haste Perk reduces it)
         let actualCD = stats.cooldown;
         if (p.perk === "haste") actualCD *= 0.85;
         p.cooldowns[slot] = now + actualCD;
@@ -475,7 +466,6 @@ io.on("connection", (socket) => {
         const spread = stats.spread || 0;
         const spawnDist = PLAYER_RADIUS + 15;
 
-        // Calculate starting angle based on spread
         let startAngle = data.angle;
         if (count > 1) startAngle = data.angle - spread / 2;
 
@@ -507,7 +497,6 @@ io.on("connection", (socket) => {
             });
         }
 
-        // Ensure cooldown is synced
         io.to(room.id).emit("cooldownUpdate", { id: socket.id, cooldowns: p.cooldowns });
     });
 
@@ -574,7 +563,6 @@ io.on("connection", (socket) => {
 setInterval(() => {
     const now = Date.now();
 
-    // Loop through every active room
     for (const rID in rooms) {
         const room = rooms[rID];
 
@@ -590,56 +578,41 @@ setInterval(() => {
         // 2. UPDATE PLAYERS (PHYSICS)
         for (const pID in room.players) {
             const p = room.players[pID];
-
             if (!p.connected) continue;
 
-            // --- MOVEMENT LOGIC FIX ---
-            // OLD CODE: Calculated movement based on keys. 
-            // NEW CODE: We trust the "playerMove" socket event for X/Y.
-
-            // Only apply map boundaries (keep them inside the map)
             if (p.x < 0) p.x = 0;
             if (p.x > MAP_WIDTH) p.x = MAP_WIDTH;
             if (p.y < 0) p.y = 0;
             if (p.y > MAP_HEIGHT) p.y = MAP_HEIGHT;
-
-            // NOTE: I removed the "if (p.keys)... p.x += dx" block entirely 
-            // so the server doesn't overwrite the client's work.
         }
 
         // 3. UPDATE BULLETS
         for (let i = room.bullets.length - 1; i >= 0; i--) {
             const b = room.bullets[i];
 
-            // Move bullet
             b.x += Math.cos(b.angle) * b.speed;
             b.y += Math.sin(b.angle) * b.speed;
             b.traveled += b.speed;
 
             let removeBullet = false;
 
-            // Range check
             if (b.traveled >= b.range && !b.isMine) {
                 removeBullet = true;
             }
 
-            // Wall/Map check
             if (b.x < -50 || b.x > MAP_WIDTH + 50 || b.y < -50 || b.y > MAP_HEIGHT + 50) {
                 removeBullet = true;
             }
 
-            // Collision Check (Hit Players)
+            // Collision Check
             if (!removeBullet) {
                 for (const pID in room.players) {
                     const p = room.players[pID];
-                    // Don't hit self, don't hit disconnected, don't hit already hit (if piercing)
-                    if (p.id !== b.ownerId && p.connected && !b.hitList.includes(p.id)) {
 
-                        // Distance formula
+                    if (p.id !== b.ownerId && p.connected && !b.hitList.includes(p.id)) {
                         const dist = Math.sqrt((p.x - b.x) ** 2 + (p.y - b.y) ** 2);
 
-                        if (dist < PLAYER_RADIUS + 10) { // +10 for bullet radius
-                            // HIT!
+                        if (dist < PLAYER_RADIUS + 10) {
 
                             // Check Shield
                             if (p.shield) {
@@ -650,16 +623,25 @@ setInterval(() => {
 
                             // Apply Damage
                             p.hp -= b.damage;
+
+                            // ------------------------------------------------------
+                            // NEW: EMIT EVENT TO TRIGGER SCREEN SHAKE ON CLIENT
+                            // ------------------------------------------------------
+                            io.to(rID).emit("playerDamage", {
+                                id: p.id,
+                                hp: p.hp,
+                                damage: b.damage
+                            });
+                            // ------------------------------------------------------
+
                             io.to(rID).emit("damageIndicator", { x: p.x, y: p.y, damage: b.damage, type: "normal" });
 
-                            // Add to hit list (for piercing)
                             b.hitList.push(p.id);
 
-                            // Handle Death
                             if (p.hp <= 0) {
                                 const killerId = b.ownerId;
                                 endGame(rID, "kill", killerId, p.id);
-                                return; // Stop processing this room immediately
+                                return;
                             }
 
                             if (!b.pierce) {
@@ -676,7 +658,6 @@ setInterval(() => {
             }
         }
 
-        // 4. BROADCAST UPDATE
         io.to(rID).emit("gameUpdate", {
             players: room.players,
             bullets: room.bullets
@@ -700,7 +681,6 @@ function findRoomAndEnd(socketId, reason, winnerId) {
 
 function endGame(roomId, reason, winnerId, loserId) {
     if (rooms[roomId]) {
-        // Clear disconnect timers if game ends naturally
         Object.keys(rooms[roomId].players).forEach((pid) => {
             if (disconnectTimers[pid]) {
                 clearTimeout(disconnectTimers[pid]);
@@ -708,7 +688,6 @@ function endGame(roomId, reason, winnerId, loserId) {
             }
         });
 
-        // Determine loser if not provided
         if (!loserId && winnerId) {
             loserId = Object.keys(rooms[roomId].players).find(
                 (id) => id !== winnerId
@@ -726,5 +705,4 @@ function endGame(roomId, reason, winnerId, loserId) {
     }
 }
 
-// Start Server
 server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
