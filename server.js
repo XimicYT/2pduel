@@ -161,48 +161,12 @@ let disconnectTimers = {};
 function getDistance(a, b) {
     return Math.sqrt(Math.pow(b.x - a.x, 2) + Math.pow(b.y - a.y, 2));
 }
-
 // ==================================================================
 // 5. SOCKET LOGIC
 // ==================================================================
 io.on("connection", (socket) => {
     console.log(`User Connected: ${socket.id}`);
-    // --- IN SERVER.JS (inside io.on('connection')) ---
 
-    // ===============================================
-    //  FIXED INPUT HANDLER
-    // ===============================================
-    // ===============================================
-    //  DEBUGGED INPUT HANDLER
-    // ===============================================
-    socket.on("input", (data) => {
-        let roomId = null;
-        for (const rID in rooms) {
-            if (rooms[rID].players[socket.id]) {
-                roomId = rID;
-                break;
-            }
-        }
-
-        if (!roomId) return;
-        const room = rooms[roomId];
-        const player = room.players[socket.id];
-
-        if (!player) return;
-
-        // LOGGING: Check if keys are actually arriving
-        const oldKeys = JSON.stringify(player.keys);
-        const newKeys = JSON.stringify(data.keys);
-
-        // Only log if input CHANGED to reduce spam
-        if (oldKeys !== newKeys) {
-            console.log(`[INPUT] ${socket.id} changed keys to:`, data.keys);
-        }
-
-        player.keys = data.keys || {};
-        player.angle = data.angle;
-        player.isShooting = data.shoot;
-    });
     // ===============================================
     //  JOIN QUEUE
     // ===============================================
@@ -349,7 +313,7 @@ io.on("connection", (socket) => {
             sock.join(foundRoomId);
 
             sock.emit("rejoinSuccess", {
-                roomId: foundRoomId, // Corrected to camelCase
+                roomId: foundRoomId,
                 me: room.players[sock.id],
                 players: room.players
             });
@@ -399,41 +363,28 @@ io.on("connection", (socket) => {
     });
 
     // ===============================================
-    //  MOVEMENT (FIXED: Handles both camelCase and regular)
-    // ===============================================
-    // ===============================================
-    //  DEBUGGED MOVEMENT HANDLER
+    //  MOVEMENT & INPUT (MERGED AND FIXED)
     // ===============================================
     socket.on("playerUpdate", (data) => {
         const rID = data.roomId || data.roomID;
 
         if (rooms[rID] && rooms[rID].players[socket.id]) {
             const player = rooms[rID].players[socket.id];
-            const room = rooms[rID];
-
-            // LOGGING: Check the difference between Client and Server
-            const dist = Math.sqrt(Math.pow(player.x - data.x, 2) + Math.pow(player.y - data.y, 2));
-
-            // If discrepancy is large, log it
-            if (dist > 5) {
-                console.log(`[SYNC ERROR] ID: ${socket.id} | Server thinks: ${player.x.toFixed(0)},${player.y.toFixed(0)} | Client sent: ${data.x.toFixed(0)},${data.y.toFixed(0)} | Diff: ${dist.toFixed(0)}`);
+            
+            // --- CRITICAL FIX: Update Keys Here ---
+            if (data.keys) {
+                player.keys = data.keys;
             }
 
-            const isCountdown = Date.now() < room.gameStartTime;
-
-            if (!isCountdown) {
-                // --- EXTREME DEBUGGING TEST ---
-                // I have commented out the line below. 
-                // We are going to STOP trusting the client position for a moment 
-                // to see if the Server Physics work on their own.
-
-                // player.x = data.x; 
-                // player.y = data.y;
-
-                // If the player freezes completely now, we know Server Physics are broken.
-                // If the player moves smoothly but lags, we know Client Sync is the issue.
-            }
+            // Update Aim & State
             player.angle = data.angle;
+            player.isShooting = data.shoot;
+
+            // Optional: Server Drift Logging (for debugging)
+            const dist = Math.sqrt(Math.pow(player.x - data.x, 2) + Math.pow(player.y - data.y, 2));
+            if (dist > 150) {
+                // console.log(`[SYNC WARNING] ID: ${socket.id} Drift: ${dist.toFixed(0)}`);
+            }
         }
     });
 
@@ -441,7 +392,6 @@ io.on("connection", (socket) => {
     //  SHOOTING & ABILITIES
     // ===============================================
     socket.on("playerShoot", (data) => {
-        // FIX 3: Check both property names
         const rID = data.roomId || data.roomID;
         const room = rooms[rID];
 
@@ -651,7 +601,6 @@ io.on("connection", (socket) => {
         if (typeof cb === "function") cb();
     });
 });
-
 // ==================================================================
 // 6. GAME LOOP (PHYSICS & REGEN)
 // ==================================================================
