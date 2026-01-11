@@ -320,6 +320,30 @@ io.on("connection", (socket) => {
 
     socket.on("playerUpdate", (data) => handleInput(socket, data));
     socket.on("input", (data) => handleInput(socket, data));
+    // ===============================================
+    //  MISSING LISTENER: PLAYER MOVE
+    // ===============================================
+    socket.on("playerMove", (data) => {
+        // 1. Find Room
+        let rID = data.roomID || data.roomId;
+
+        // Fallback: search if ID missing
+        if (!rID || !rooms[rID]) {
+            rID = Object.keys(rooms).find(id => rooms[id].players[socket.id]);
+        }
+
+        // 2. Validate
+        if (!rID || !rooms[rID] || !rooms[rID].players[socket.id]) return;
+
+        // 3. Update Position directly from Client
+        const p = rooms[rID].players[socket.id];
+
+        p.x = data.x;
+        p.y = data.y;
+        p.angle = data.angle;
+        p.vx = data.vx; // Important for smoothing on opponent screens
+        p.vy = data.vy;
+    });
 
     // ===============================================
     //  SHOOTING & ABILITIES (UPDATED WITH DEBUG)
@@ -590,49 +614,18 @@ setInterval(() => {
 
             if (!p.connected) continue;
 
-            // --- MOVEMENT LOGIC ---
-            let dx = 0;
-            let dy = 0;
+            // --- MOVEMENT LOGIC FIX ---
+            // OLD CODE: Calculated movement based on keys. 
+            // NEW CODE: We trust the "playerMove" socket event for X/Y.
 
-            // Speed calculation
-            let speed = PLAYER_SPEED * (p.speedMult || 1.0);
-            if (p.isShooting) speed *= 0.6; // Slow down while shooting
-
-            // Handle Input
-            if (p.keys) {
-                if (p.keys.up || p.keys.w) dy -= 1;
-                if (p.keys.down || p.keys.s) dy += 1;
-                if (p.keys.left || p.keys.a) dx -= 1;
-                if (p.keys.right || p.keys.d) dx += 1;
-            }
-
-            // Normalize vector
-            if (dx !== 0 || dy !== 0) {
-                const length = Math.sqrt(dx * dx + dy * dy);
-                dx /= length;
-                dy /= length;
-
-                // Apply Velocity
-                p.x += dx * speed;
-                p.y += dy * speed;
-            }
-
-            // Apply Knockback / Dash Velocity
-            if (Math.abs(p.vx) > 0.1 || Math.abs(p.vy) > 0.1) {
-                p.x += p.vx;
-                p.y += p.vy;
-                p.vx *= 0.9; // Friction
-                p.vy *= 0.9;
-            } else {
-                p.vx = 0;
-                p.vy = 0;
-            }
-
-            // Map Boundaries
+            // Only apply map boundaries (keep them inside the map)
             if (p.x < 0) p.x = 0;
             if (p.x > MAP_WIDTH) p.x = MAP_WIDTH;
             if (p.y < 0) p.y = 0;
             if (p.y > MAP_HEIGHT) p.y = MAP_HEIGHT;
+
+            // NOTE: I removed the "if (p.keys)... p.x += dx" block entirely 
+            // so the server doesn't overwrite the client's work.
         }
 
         // 3. UPDATE BULLETS
