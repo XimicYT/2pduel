@@ -387,6 +387,17 @@ io.on("connection", (socket) => {
             }
         }
     });
+    // --- COMPATIBILITY FIX: Listen for 'input' too ---
+    socket.on("input", (data) => {
+        // Redirect 'input' to 'playerUpdate' logic  
+        const rID = data.roomId || data.roomID;
+        if (rooms[rID] && rooms[rID].players[socket.id]) {
+            const player = rooms[rID].players[socket.id];
+            if (data.keys) player.keys = data.keys;
+            player.angle = data.angle;
+            player.isShooting = data.shoot;
+        }
+    });
 
     // ===============================================
     //  SHOOTING & ABILITIES
@@ -602,234 +613,158 @@ io.on("connection", (socket) => {
     });
 });
 // ==================================================================
-// 6. GAME LOOP (PHYSICS & REGEN)
+// 6. GAME LOOP (The Engine)
 // ==================================================================
 setInterval(() => {
-    for (const roomId in rooms) {
-        const room = rooms[roomId];
-        updateRoom(room);
-
-        // Broadcast positions every few ticks to save bandwidth
-        // (BROADCAST_RATE is defined as 2 at the top of your file)
-        if (room.tickCount % BROADCAST_RATE === 0) {
-            broadcastRoomState(room);
-        }
-    }
-}, TICK_RATE);
-
-function broadcastRoomState(room) {
-    const playerIds = Object.keys(room.players);
-    if (playerIds.length !== 2) return;
-
-    const p1 = room.players[playerIds[0]];
-    const p2 = room.players[playerIds[1]];
-
-    // Send Opponent Data (We ALWAYS want to see where the opponent is)
-    io.to(playerIds[1]).emit("opponentUpdate", {
-        x: p1.x, y: p1.y, vx: p1.vx, vy: p1.vy,
-        angle: p1.angle, invisible: p1.invisible, shield: p1.shield,
-    });
-    io.to(playerIds[0]).emit("opponentUpdate", {
-        x: p2.x, y: p2.y, vx: p2.vx, vy: p2.vy,
-        angle: p2.angle, invisible: p2.invisible, shield: p2.shield,
-    });
-
-    // FIX 4: Self Update Strategy
-    // Only send X/Y correction if the player has High Server Velocity (e.g. they got dashed/knocked back)
-    // Otherwise, send null X/Y so the client continues smooth prediction
-
-    const p1Force = Math.abs(p1.vx) > 0.1 || Math.abs(p1.vy) > 0.1;
-    const p2Force = Math.abs(p2.vx) > 0.1 || Math.abs(p2.vy) > 0.1;
-
-    // --- FIX: Always send p1.x and p1.y, never send null ---
-    // Send P1 update to P1 (Always send X and Y)
-    io.to(playerIds[0]).emit("selfUpdate", {
-        x: p1.x,
-        y: p1.y,
-        vx: p1.vx,
-        vy: p1.vy,
-        hp: p1.hp,
-    });
-
-    // Send P2 update to P2 (Always send X and Y)
-    io.to(playerIds[1]).emit("selfUpdate", {
-        x: p2.x,
-        y: p2.y,
-        vx: p2.vx,
-        vy: p2.vy,
-        hp: p2.hp,
-    });
-}
-
-function updateRoom(room) {
-    // --- 1. COUNTDOWN LOGIC ---
-    if (Date.now() < room.gameStartTime) {
-        Object.values(room.players).forEach((p) => {
-            p.vx = 0;
-            p.vy = 0;
-        });
-        if (room.tickCount % 10 === 0) {
-            Object.keys(room.players).forEach(pid => {
-                const p = room.players[pid];
-                io.to(pid).emit("selfUpdate", { x: p.x, y: p.y, hp: p.hp });
-            });
-        }
-        room.tickCount++;
-        return;
-    }
-
-    // --- 2. SETUP VARIABLES ---
     const now = Date.now();
-    let stateChanged = false;
-    room.tickCount = (room.tickCount || 0) + 1;
 
-    // *** FIX: DEFINE SHOULD BROADCAST HERE ***
-    const shouldBroadcast = room.tickCount % BROADCAST_RATE === 0;
+    // Loop through every active room
+    for (const rID in rooms) {
+        const room = rooms[rID];
 
-    // --- 3. PHYSICS UPDATE FOR PLAYERS ---
-    const playerIds = Object.keys(room.players);
-
-    playerIds.forEach((pid) => {
-        const p = room.players[pid];
-
-        // Check Pinball/Stun
-        const isPinball = p.repulseEndTime && p.repulseEndTime > now;
-
-        // Apply Inputs
-        const moveSpeed = 5;
-        if (room.tickCount % 60 === 0 && p.keys) {
-            console.log(`[PHYSICS TICK] ID: ${pid} | Keys: ${JSON.stringify(p.keys)} | VX: ${p.vx} | VY: ${p.vy} | Pos: ${p.x.toFixed(0)}, ${p.y.toFixed(0)}`);
+        // 1. CHECK START TIME
+        if (now < room.gameStartTime) {
+            // Game hasn't started yet, just send static positions
+             io.to(rID).emit("gameUpdate", { 
+                players: room.players, 
+                bullets: [] 
+            });
+            continue;
         }
 
-        if (!isPinball) {
-            p.vx = 0;
-            p.vy = 0;
+        // 2. UPDATE PLAYERS (PHYSICS)
+        for (const pID in room.players) {
+            const p = room.players[pID];
 
+            if (!p.connected) continue;
+
+            // --- MOVEMENT LOGIC ---
+            let dx = 0;
+            let dy = 0;
+            
+            // Speed calculation
+            let speed = PLAYER_SPEED * (p.speedMult || 1.0);
+            if (p.isShooting) speed *= 0.6; // Slow down while shooting
+
+            // Handle Input (Supports WASD or Arrow Keys)
             if (p.keys) {
-                if (p.keys.w) p.vy = -moveSpeed;
-                if (p.keys.s) p.vy = moveSpeed;
-                if (p.keys.a) p.vx = -moveSpeed;
-                if (p.keys.d) p.vx = moveSpeed;
+                if (p.keys.up || p.keys.w)    dy -= 1;
+                if (p.keys.down || p.keys.s)  dy += 1;
+                if (p.keys.left || p.keys.a)  dx -= 1;
+                if (p.keys.right || p.keys.d) dx += 1;
+            }
 
-                if (p.vx !== 0 && p.vy !== 0) {
-                    p.vx *= 0.707;
-                    p.vy *= 0.707;
+            // Normalize vector (prevent diagonal speed boost)
+            if (dx !== 0 || dy !== 0) {
+                const length = Math.sqrt(dx * dx + dy * dy);
+                dx /= length;
+                dy /= length;
+                
+                // Apply Velocity
+                p.x += dx * speed;
+                p.y += dy * speed;
+            }
 
-                }
+            // Apply Knockback / Dash Velocity
+            if (Math.abs(p.vx) > 0.1 || Math.abs(p.vy) > 0.1) {
+                p.x += p.vx;
+                p.y += p.vy;
+                p.vx *= 0.9; // Friction
+                p.vy *= 0.9;
+            } else {
+                p.vx = 0;
+                p.vy = 0;
             }
-            if ((p.vx !== 0 || p.vy !== 0) && room.tickCount % 60 === 0) {
-                console.log(`[MOVING] ID: ${pid} is moving! VX: ${p.vx} VY: ${p.vy}`);
-            }
-            if (p.speedMult) {
-                p.vx *= p.speedMult;
-                p.vy *= p.speedMult;
-            }
+
+            // Map Boundaries
+            if (p.x < 0) p.x = 0;
+            if (p.x > MAP_WIDTH) p.x = MAP_WIDTH;
+            if (p.y < 0) p.y = 0;
+            if (p.y > MAP_HEIGHT) p.y = MAP_HEIGHT;
         }
 
-        // Apply Velocity
-        p.x += p.vx;
-        p.y += p.vy;
-
-        // Friction (only for pinball/knockback)
-        if (isPinball) {
-            p.vx *= 0.9;
-            p.vy *= 0.9;
-
-            if (Math.abs(p.vx) < 0.1 && Math.abs(p.vy) < 0.1) {
-                p.repulseEndTime = 0;
-            }
-        }
-
-        // Map Boundaries
-        if (p.x < PLAYER_RADIUS) p.x = PLAYER_RADIUS;
-        if (p.x > MAP_WIDTH - PLAYER_RADIUS) p.x = MAP_WIDTH - PLAYER_RADIUS;
-        if (p.y < PLAYER_RADIUS) p.y = PLAYER_RADIUS;
-        if (p.y > MAP_HEIGHT - PLAYER_RADIUS) p.y = MAP_HEIGHT - PLAYER_RADIUS;
-    });
-
-    // --- 4. BULLET LOGIC ---
-    if (!room.bullets || room.bullets.length === 0) return;
-
-    let bulletsToRemove = [];
-    room.bullets.forEach((b) => {
-        // Move Bullet
-        if (!b.isMine) {
+        // 3. UPDATE BULLETS
+        for (let i = room.bullets.length - 1; i >= 0; i--) {
+            const b = room.bullets[i];
+            
+            // Move bullet
             b.x += Math.cos(b.angle) * b.speed;
             b.y += Math.sin(b.angle) * b.speed;
             b.traveled += b.speed;
-        } else {
-            b.traveled += 16;
-        }
 
-        // Check Range/Walls
-        if (
-            b.traveled > b.range ||
-            b.x < 0 || b.x > MAP_WIDTH ||
-            b.y < 0 || b.y > MAP_HEIGHT
-        ) {
-            bulletsToRemove.push(b.id);
-        }
+            let removeBullet = false;
 
-        // Check Collisions
-        for (const playerId in room.players) {
-            const player = room.players[playerId];
-            if (playerId === b.ownerId && (!b.isMine || b.traveled < 500)) continue;
-            if (b.pierce && b.hitList && b.hitList.includes(playerId)) continue;
+            // Range check
+            if (b.traveled >= b.range && !b.isMine) {
+                removeBullet = true;
+            }
 
-            if (getDistance(b, player) < PLAYER_RADIUS + 6) {
-                if (player.shield) {
-                    // ... Shield logic (keep your existing code here) ...
-                    player.shield = false;
-                    // (Simplified for brevity, keep your original full logic here)
-                    bulletsToRemove.push(b.id);
-                    break;
-                } else {
-                    // Hit Logic
-                    player.hp -= b.damage;
-                    player.lastDamageTime = Date.now();
+            // Wall/Map check
+            if (b.x < -50 || b.x > MAP_WIDTH + 50 || b.y < -50 || b.y > MAP_HEIGHT + 50) {
+                removeBullet = true;
+            }
 
-                    // Explosion Logic
-                    if (b.explosive) {
-                        io.to(room.id).emit("visualEffect", { type: "hit", x: b.x, y: b.y });
-                        // ... blast damage logic ...
-                    } else {
-                        io.to(room.id).emit("visualEffect", { type: "hit", x: b.x, y: b.y });
-                    }
+            // Collision Check (Hit Players)
+            if (!removeBullet) {
+                for (const pID in room.players) {
+                    const p = room.players[pID];
+                    // Don't hit self, don't hit disconnected, don't hit already hit (if piercing)
+                    if (p.id !== b.ownerId && p.connected && !b.hitList.includes(p.id)) {
+                        
+                        // Distance formula
+                        const dist = Math.sqrt((p.x - b.x) ** 2 + (p.y - b.y) ** 2);
+                        
+                        if (dist < PLAYER_RADIUS + 10) { // +10 for bullet radius
+                            // HIT!
+                            
+                            // Check Shield
+                            if (p.shield) {
+                                io.to(rID).emit("damageIndicator", { x: p.x, y: p.y, damage: 0, type: "shield" });
+                                removeBullet = true;
+                                break;
+                            }
 
-                    io.to(room.id).emit("playerDamage", { id: playerId, hp: player.hp });
+                            // Apply Damage
+                            p.hp -= b.damage;
+                            io.to(rID).emit("damageIndicator", { x: p.x, y: p.y, damage: b.damage, type: "normal" });
+                            
+                            // Add to hit list (for piercing)
+                            b.hitList.push(p.id);
 
-                    if (player.hp <= 0) {
-                        endGame(room.id, "kill", b.ownerId, playerId);
-                        return;
-                    }
+                            // Handle Death
+                            if (p.hp <= 0) {
+                                const killerId = b.ownerId;
+                                endGame(rID, "kill", killerId, p.id);
+                                return; // Stop processing this room immediately
+                            }
 
-                    if (b.pierce) {
-                        if (!b.hitList) b.hitList = [];
-                        b.hitList.push(playerId);
-                    } else {
-                        bulletsToRemove.push(b.id);
-                        break;
+                            if (!b.pierce) {
+                                removeBullet = true;
+                                break;
+                            }
+                        }
                     }
                 }
             }
+
+            if (removeBullet) {
+                room.bullets.splice(i, 1);
+            }
         }
-    });
 
-    // Remove dead bullets
-    if (bulletsToRemove.length > 0) {
-        room.bullets = room.bullets.filter((b) => !bulletsToRemove.includes(b.id));
-        stateChanged = true;
+        // 4. BROADCAST UPDATE
+        // This sends the calculated positions to the clients
+        io.to(rID).emit("gameUpdate", {
+            players: room.players,
+            bullets: room.bullets
+        });
     }
+}, 1000 / 60); // Run 60 times per second
 
-    // --- 5. BROADCAST PROJECTILES ---
-    // This line was failing before because shouldBroadcast was missing
-    if (stateChanged || (room.bullets && room.bullets.length > 0 && shouldBroadcast)) {
-        io.to(room.id).emit("projectilesUpdate", room.bullets);
-    }
-    if (shouldBroadcast) {
-        broadcastRoomState(room);
-    }
-}
+
+// ===============================================
+//  HELPER FUNCTIONS
+// ===============================================
 
 function findRoomAndEnd(socketId, reason, winnerId) {
     for (const rID in rooms) {
@@ -842,6 +777,7 @@ function findRoomAndEnd(socketId, reason, winnerId) {
 
 function endGame(roomId, reason, winnerId, loserId) {
     if (rooms[roomId]) {
+        // Clear disconnect timers if game ends naturally
         Object.keys(rooms[roomId].players).forEach((pid) => {
             if (disconnectTimers[pid]) {
                 clearTimeout(disconnectTimers[pid]);
@@ -849,19 +785,23 @@ function endGame(roomId, reason, winnerId, loserId) {
             }
         });
 
+        // Determine loser if not provided
         if (!loserId && winnerId) {
             loserId = Object.keys(rooms[roomId].players).find(
                 (id) => id !== winnerId
             );
         }
+
         io.to(roomId).emit("gameOver", {
             winner: reason,
             winnerId: winnerId,
             loserId: loserId,
         });
+
         console.log(`[GAME OVER] Room ${roomId} ended. Reason: ${reason}`);
         delete rooms[roomId];
     }
 }
 
+// Start Server
 server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
