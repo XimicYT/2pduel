@@ -178,8 +178,16 @@ io.on("connection", (socket) => {
             p1.join(roomId);
             p2.join(roomId);
 
-            p1.emit("matchFound", { roomId, playerId: p1.id, players: rooms[roomId].players, matchToken: token1 });
-            p2.emit("matchFound", { roomId, playerId: p2.id, players: rooms[roomId].players, matchToken: token2 });
+            // --- FIX: Send BOTH capitalization formats ---
+            const roomData = {
+                roomId,
+                roomID: roomId, // <--- Added this extra key
+                players: rooms[roomId].players
+            };
+
+            p1.emit("matchFound", { ...roomData, playerId: p1.id, matchToken: token1 });
+            p2.emit("matchFound", { ...roomData, playerId: p2.id, matchToken: token2 });
+            // ---------------------------------------------
 
             console.log(`[MATCH] Created Room ${roomId}`);
         }
@@ -230,6 +238,7 @@ io.on("connection", (socket) => {
 
             sock.emit("rejoinSuccess", {
                 roomId: foundRoomId,
+                roomID: foundRoomId, // <--- Added this extra key
                 me: room.players[sock.id],
                 players: room.players
             });
@@ -287,7 +296,7 @@ io.on("connection", (socket) => {
 
         // 1. Try to get Room ID from data, otherwise find it automatically
         let rID = data.roomId || data.roomID;
-        
+
         if (!rID || !rooms[rID]) {
             // Search all rooms to find which one this player is in
             rID = Object.keys(rooms).find(id => rooms[id].players[socket.id]);
@@ -295,7 +304,7 @@ io.on("connection", (socket) => {
 
         if (rID && rooms[rID] && rooms[rID].players[socket.id]) {
             const player = rooms[rID].players[socket.id];
-            
+
             // Update Keys
             if (data.keys) {
                 player.keys = data.keys;
@@ -323,7 +332,7 @@ io.on("connection", (socket) => {
         }
 
         const room = rooms[rID];
-        
+
         // Safety check
         if (!room || !room.players[socket.id]) {
             console.log(`[DEBUG_SHOOT_FAIL] No room for ${socket.id}`);
@@ -341,7 +350,7 @@ io.on("connection", (socket) => {
         if (!p.cooldowns) p.cooldowns = {};
         if (p.cooldowns[slot] && p.cooldowns[slot] > now) {
             console.log(`[DEBUG_COOLDOWN] ${slot} rejected for ${socket.id}. Remaining: ${p.cooldowns[slot] - now}`);
-            
+
             // KEY FIX: Tell the client exactly what the server thinks the cooldown is
             io.to(rID).emit("cooldownUpdate", { id: socket.id, cooldowns: p.cooldowns });
             return;
@@ -375,12 +384,12 @@ io.on("connection", (socket) => {
             else if (utilType === "shield") {
                 p.shield = true;
                 cdTime = 0; // Cooldown starts AFTER shield breaks/ends
-                
+
                 setTimeout(() => {
                     if (rooms[rID]?.players[socket.id]?.shield) {
                         rooms[rID].players[socket.id].shield = false;
                         rooms[rID].players[socket.id].cooldowns.utility = Date.now() + COOLDOWNS.shield;
-                        
+
                         io.to(rID).emit("cooldownUpdate", {
                             id: socket.id, cooldowns: rooms[rID].players[socket.id].cooldowns,
                         });
@@ -412,7 +421,7 @@ io.on("connection", (socket) => {
                         const force = 80;
                         enemy.vx = Math.cos(angle) * force;
                         enemy.vy = Math.sin(angle) * force;
-                        
+
                         io.to(pid).emit("forcePush", { angle: angle, force: 30 });
                         hitAnyone = true;
                     }
@@ -430,7 +439,7 @@ io.on("connection", (socket) => {
         // ============================
         // B. WEAPON LOGIC
         // ============================
-        
+
         // Shooting breaks invisibility
         if (p.invisible) p.invisible = false;
 
@@ -446,7 +455,7 @@ io.on("connection", (socket) => {
         if (stats.type === "mine") {
             let actualDamage = stats.damage;
             if (p.perk === "lethality") actualDamage *= 1.15;
-            
+
             room.bullets.push({
                 id: `m_${Date.now()}_${Math.random()}`,
                 ownerId: socket.id,
@@ -462,7 +471,7 @@ io.on("connection", (socket) => {
         const count = stats.count || 1;
         const spread = stats.spread || 0;
         const spawnDist = PLAYER_RADIUS + 15;
-        
+
         // Calculate starting angle based on spread
         let startAngle = data.angle;
         if (count > 1) startAngle = data.angle - spread / 2;
@@ -568,9 +577,9 @@ setInterval(() => {
 
         // 1. CHECK START TIME
         if (now < room.gameStartTime) {
-            io.to(rID).emit("gameUpdate", { 
-                players: room.players, 
-                bullets: [] 
+            io.to(rID).emit("gameUpdate", {
+                players: room.players,
+                bullets: []
             });
             continue;
         }
@@ -584,16 +593,16 @@ setInterval(() => {
             // --- MOVEMENT LOGIC ---
             let dx = 0;
             let dy = 0;
-            
+
             // Speed calculation
             let speed = PLAYER_SPEED * (p.speedMult || 1.0);
             if (p.isShooting) speed *= 0.6; // Slow down while shooting
 
             // Handle Input
             if (p.keys) {
-                if (p.keys.up || p.keys.w)    dy -= 1;
-                if (p.keys.down || p.keys.s)  dy += 1;
-                if (p.keys.left || p.keys.a)  dx -= 1;
+                if (p.keys.up || p.keys.w) dy -= 1;
+                if (p.keys.down || p.keys.s) dy += 1;
+                if (p.keys.left || p.keys.a) dx -= 1;
                 if (p.keys.right || p.keys.d) dx += 1;
             }
 
@@ -602,7 +611,7 @@ setInterval(() => {
                 const length = Math.sqrt(dx * dx + dy * dy);
                 dx /= length;
                 dy /= length;
-                
+
                 // Apply Velocity
                 p.x += dx * speed;
                 p.y += dy * speed;
@@ -629,7 +638,7 @@ setInterval(() => {
         // 3. UPDATE BULLETS
         for (let i = room.bullets.length - 1; i >= 0; i--) {
             const b = room.bullets[i];
-            
+
             // Move bullet
             b.x += Math.cos(b.angle) * b.speed;
             b.y += Math.sin(b.angle) * b.speed;
@@ -653,13 +662,13 @@ setInterval(() => {
                     const p = room.players[pID];
                     // Don't hit self, don't hit disconnected, don't hit already hit (if piercing)
                     if (p.id !== b.ownerId && p.connected && !b.hitList.includes(p.id)) {
-                        
+
                         // Distance formula
                         const dist = Math.sqrt((p.x - b.x) ** 2 + (p.y - b.y) ** 2);
-                        
+
                         if (dist < PLAYER_RADIUS + 10) { // +10 for bullet radius
                             // HIT!
-                            
+
                             // Check Shield
                             if (p.shield) {
                                 io.to(rID).emit("damageIndicator", { x: p.x, y: p.y, damage: 0, type: "shield" });
@@ -670,7 +679,7 @@ setInterval(() => {
                             // Apply Damage
                             p.hp -= b.damage;
                             io.to(rID).emit("damageIndicator", { x: p.x, y: p.y, damage: b.damage, type: "normal" });
-                            
+
                             // Add to hit list (for piercing)
                             b.hitList.push(p.id);
 
