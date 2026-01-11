@@ -28,7 +28,9 @@ const BROADCAST_RATE = 2;
 const MAP_WIDTH = 1920;
 const MAP_HEIGHT = 1080;
 const PLAYER_RADIUS = 30;
+const PLAYER_SPEED = 5;
 const COUNTDOWN_TIME = 3000;
+
 
 // --- ABILITY CONSTANTS ---
 const DASH_DURATION = 500;
