@@ -23,14 +23,11 @@ const PORT = process.env.PORT || 3000;
 // 2. CONFIGURATION & CONSTANTS
 // ==================================================================
 const TICK_RATE = 1000 / 60;
-const BROADCAST_RATE = 2;
-
 const MAP_WIDTH = 1920;
 const MAP_HEIGHT = 1080;
 const PLAYER_RADIUS = 30;
 const PLAYER_SPEED = 5;
 const COUNTDOWN_TIME = 3000;
-
 
 // --- ABILITY CONSTANTS ---
 const DASH_DURATION = 500;
@@ -53,98 +50,17 @@ const COOLDOWNS = {
 // ==================================================================
 const WEAPONS = {
     // --- PRIMARY ---
-    pulse: {
-        type: "gun",
-        damage: 12,
-        speed: 22,
-        cooldown: 140,
-        range: 1100,
-        color: "#00f3ff",
-        desc: "Standard Rifle",
-    },
-    rail: {
-        type: "gun",
-        damage: 40,
-        speed: 60,
-        cooldown: 1500,
-        range: 3000,
-        color: "#ff0055",
-        pierce: true,
-        desc: "Piercing Sniper",
-    },
-    scatter: {
-        type: "gun",
-        damage: 7,
-        speed: 22,
-        cooldown: 850,
-        range: 550,
-        color: "#ffff00",
-        count: 6,
-        spread: 0.4,
-        desc: "Shotgun",
-    },
-    void: {
-        type: "gun",
-        damage: 20,
-        speed: 14,
-        cooldown: 1800,
-        range: 1100,
-        color: "#9900ff",
-        size: 14,
-        explosive: true,
-        blastRadius: 180,
-        blastDamage: 40,
-        desc: "Explosive Launcher",
-    },
-    twin: {
-        type: "gun",
-        damage: 8,
-        speed: 26,
-        cooldown: 60,
-        range: 750,
-        color: "#00ffaa",
-        desc: "Rapid SMG",
-    },
+    pulse: { type: "gun", damage: 12, speed: 22, cooldown: 140, range: 1100, color: "#00f3ff", desc: "Standard Rifle" },
+    rail: { type: "gun", damage: 40, speed: 60, cooldown: 1500, range: 3000, color: "#ff0055", pierce: true, desc: "Piercing Sniper" },
+    scatter: { type: "gun", damage: 7, speed: 22, cooldown: 850, range: 550, color: "#ffff00", count: 6, spread: 0.4, desc: "Shotgun" },
+    void: { type: "gun", damage: 20, speed: 14, cooldown: 1800, range: 1100, color: "#9900ff", size: 14, explosive: true, blastRadius: 180, blastDamage: 40, desc: "Explosive Launcher" },
+    twin: { type: "gun", damage: 8, speed: 26, cooldown: 60, range: 750, color: "#00ffaa", desc: "Rapid SMG" },
 
     // --- SECONDARY ---
-    pistol: {
-        type: "gun",
-        damage: 14,
-        speed: 20,
-        cooldown: 300,
-        range: 900,
-        color: "#cccccc",
-        desc: "Sidearm",
-    },
-    mag: {
-        type: "gun",
-        damage: 32,
-        speed: 30,
-        cooldown: 700,
-        range: 1200,
-        color: "#ffaa00",
-        desc: "Heavy Pistol",
-    },
-    knife: {
-        type: "gun",
-        damage: 60,
-        speed: 35,
-        cooldown: 500,
-        range: 100,
-        color: "#ffffff",
-        size: 10,
-        desc: "Melee Slash",
-    },
-    mine: {
-        type: "mine",
-        damage: 60,
-        speed: 0,
-        cooldown: 4000,
-        range: 9999,
-        color: "#ff0000",
-        life: 8000,
-        desc: "Proximity Mine",
-    },
+    pistol: { type: "gun", damage: 14, speed: 20, cooldown: 300, range: 900, color: "#cccccc", desc: "Sidearm" },
+    mag: { type: "gun", damage: 32, speed: 30, cooldown: 700, range: 1200, color: "#ffaa00", desc: "Heavy Pistol" },
+    knife: { type: "gun", damage: 60, speed: 35, cooldown: 500, range: 100, color: "#ffffff", size: 10, desc: "Melee Slash" },
+    mine: { type: "mine", damage: 60, speed: 0, cooldown: 4000, range: 9999, color: "#ff0000", life: 8000, desc: "Proximity Mine" },
 
     // --- UTILITIES ---
     repulse: { cooldown: COOLDOWNS.repulse },
@@ -160,20 +76,16 @@ let rooms = {};
 let waitingPlayers = [];
 let disconnectTimers = {};
 
-function getDistance(a, b) {
-    return Math.sqrt(Math.pow(b.x - a.x, 2) + Math.pow(b.y - a.y, 2));
-}
 // ==================================================================
 // 5. SOCKET LOGIC
 // ==================================================================
 io.on("connection", (socket) => {
-    console.log(`User Connected: ${socket.id}`);
+    console.log(`[CONNECT] User Connected: ${socket.id}`);
 
     // ===============================================
     //  JOIN QUEUE
     // ===============================================
     socket.on("joinQueue", (data) => {
-
         // 1. SAVE USER DATA
         if (data) {
             socket.userData = {
@@ -188,7 +100,6 @@ io.on("connection", (socket) => {
         // 2. CHECK FOR REJOIN TOKEN
         if (data && data.token) {
             const token = data.token;
-            // Search all rooms
             for (const rID in rooms) {
                 const room = rooms[rID];
                 const pID = Object.keys(room.players).find(
@@ -196,6 +107,7 @@ io.on("connection", (socket) => {
                 );
 
                 if (pID) {
+                    console.log(`[REJOIN] Token found for room ${rID}`);
                     handleRejoin(socket, token);
                     return;
                 }
@@ -236,14 +148,16 @@ io.on("connection", (socket) => {
                         hp: 100, maxHp: 100, color: "red", score: 0, connected: true, matchToken: token1,
                         cooldowns: {}, angle: 0, vx: 0, vy: 0,
                         username: p1Data.username, perk: p1Data.perk,
-                        primary: p1Data.primary, secondary: p1Data.secondary, utility: p1Data.utility
+                        primary: p1Data.primary, secondary: p1Data.secondary, utility: p1Data.utility,
+                        keys: {}, isShooting: false
                     },
                     [p2.id]: {
                         id: p2.id, x: MAP_WIDTH - 100, y: MAP_HEIGHT / 2,
                         hp: 100, maxHp: 100, color: "blue", score: 0, connected: true, matchToken: token2,
                         cooldowns: {}, angle: Math.PI, vx: 0, vy: 0,
                         username: p2Data.username, perk: p2Data.perk,
-                        primary: p2Data.primary, secondary: p2Data.secondary, utility: p2Data.utility
+                        primary: p2Data.primary, secondary: p2Data.secondary, utility: p2Data.utility,
+                        keys: {}, isShooting: false
                     },
                 },
                 bullets: [],
@@ -363,10 +277,14 @@ io.on("connection", (socket) => {
             endGame(targetRoomId, "forfeit", winnerId, socket.id);
         }
     });
-// ===============================================
-    //  MOVEMENT & INPUT (SMART FIX)
+
+    // ===============================================
+    //  MOVEMENT & INPUT (SMART FIX APPLIED)
     // ===============================================
     function handleInput(socket, data) {
+        // DEBUG: Uncomment to see if raw input is arriving
+        // console.log(`[DEBUG_INPUT] ${socket.id} - ${JSON.stringify(data)}`);
+
         // 1. Try to get Room ID from data, otherwise find it automatically
         let rID = data.roomId || data.roomID;
         
@@ -386,17 +304,19 @@ io.on("connection", (socket) => {
             // Update Aim & State
             if (typeof data.angle !== 'undefined') player.angle = data.angle;
             if (typeof data.shoot !== 'undefined') player.isShooting = data.shoot;
+        } else {
+            console.log(`[DEBUG_FAIL] Input received but no room found for ${socket.id}`);
         }
     }
 
     socket.on("playerUpdate", (data) => handleInput(socket, data));
     socket.on("input", (data) => handleInput(socket, data));
- // ===============================================
-    //  SHOOTING & ABILITIES (UPDATED)
+
+    // ===============================================
+    //  SHOOTING & ABILITIES (UPDATED WITH DEBUG)
     // ===============================================
     socket.on("playerShoot", (data) => {
         // 1. SMART ROOM FINDING (The Fix)
-        // If the client didn't send a valid ID, search for the player manually
         let rID = data.roomId || data.roomID;
         if (!rID || !rooms[rID]) {
             rID = Object.keys(rooms).find(id => rooms[id].players[socket.id]);
@@ -404,8 +324,11 @@ io.on("connection", (socket) => {
 
         const room = rooms[rID];
         
-        // Safety check: If we still can't find the room or player, stop.
-        if (!room || !room.players[socket.id]) return;
+        // Safety check
+        if (!room || !room.players[socket.id]) {
+            console.log(`[DEBUG_SHOOT_FAIL] No room for ${socket.id}`);
+            return;
+        }
 
         // 2. CHECK GAME START
         if (Date.now() < room.gameStartTime) return;
@@ -414,9 +337,17 @@ io.on("connection", (socket) => {
         const now = Date.now();
         const slot = data.slot; // "primary", "secondary", or "utility"
 
-        // 3. CHECK COOLDOWNS
+        // 3. CHECK COOLDOWNS (AND SYNC CLIENT)
         if (!p.cooldowns) p.cooldowns = {};
-        if (p.cooldowns[slot] && p.cooldowns[slot] > now) return;
+        if (p.cooldowns[slot] && p.cooldowns[slot] > now) {
+            console.log(`[DEBUG_COOLDOWN] ${slot} rejected for ${socket.id}. Remaining: ${p.cooldowns[slot] - now}`);
+            
+            // KEY FIX: Tell the client exactly what the server thinks the cooldown is
+            io.to(rID).emit("cooldownUpdate", { id: socket.id, cooldowns: p.cooldowns });
+            return;
+        }
+
+        console.log(`[DEBUG_SHOOT] ${socket.id} fired ${slot}`);
 
         // ============================
         // A. UTILITY LOGIC
@@ -431,12 +362,10 @@ io.on("connection", (socket) => {
                 p.vy = Math.sin(p.angle) * dashPower;
                 p.speedMult = DASH_MULTIPLIER;
 
-                // Send visual buff to client
                 io.to(room.id).emit("applyBuff", {
                     id: socket.id, type: "speed", val: p.speedMult, duration: DASH_DURATION,
                 });
 
-                // Reset speed after duration
                 setTimeout(() => {
                     if (rooms[rID]?.players[socket.id]) rooms[rID].players[socket.id].speedMult = 1.0;
                 }, DASH_DURATION);
@@ -484,7 +413,6 @@ io.on("connection", (socket) => {
                         enemy.vx = Math.cos(angle) * force;
                         enemy.vy = Math.sin(angle) * force;
                         
-                        // Notify enemy they got pushed
                         io.to(pid).emit("forcePush", { angle: angle, force: 30 });
                         hitAnyone = true;
                     }
@@ -567,8 +495,11 @@ io.on("connection", (socket) => {
             });
         }
 
+        // Ensure cooldown is synced
         io.to(room.id).emit("cooldownUpdate", { id: socket.id, cooldowns: p.cooldowns });
-    });    // --- RECONNECT / DISCONNECT / LEAVE ---
+    });
+
+    // --- RECONNECT / DISCONNECT / LEAVE ---
     socket.on("abandonMatch", () => {
         findRoomAndEnd(socket.id, "draw", null);
     });
@@ -624,6 +555,7 @@ io.on("connection", (socket) => {
         if (typeof cb === "function") cb();
     });
 });
+
 // ==================================================================
 // 6. GAME LOOP (The Engine)
 // ==================================================================
@@ -636,8 +568,7 @@ setInterval(() => {
 
         // 1. CHECK START TIME
         if (now < room.gameStartTime) {
-            // Game hasn't started yet, just send static positions
-             io.to(rID).emit("gameUpdate", { 
+            io.to(rID).emit("gameUpdate", { 
                 players: room.players, 
                 bullets: [] 
             });
@@ -658,7 +589,7 @@ setInterval(() => {
             let speed = PLAYER_SPEED * (p.speedMult || 1.0);
             if (p.isShooting) speed *= 0.6; // Slow down while shooting
 
-            // Handle Input (Supports WASD or Arrow Keys)
+            // Handle Input
             if (p.keys) {
                 if (p.keys.up || p.keys.w)    dy -= 1;
                 if (p.keys.down || p.keys.s)  dy += 1;
@@ -666,7 +597,7 @@ setInterval(() => {
                 if (p.keys.right || p.keys.d) dx += 1;
             }
 
-            // Normalize vector (prevent diagonal speed boost)
+            // Normalize vector
             if (dx !== 0 || dy !== 0) {
                 const length = Math.sqrt(dx * dx + dy * dy);
                 dx /= length;
@@ -765,13 +696,12 @@ setInterval(() => {
         }
 
         // 4. BROADCAST UPDATE
-        // This sends the calculated positions to the clients
         io.to(rID).emit("gameUpdate", {
             players: room.players,
             bullets: room.bullets
         });
     }
-}, 1000 / 60); // Run 60 times per second
+}, TICK_RATE);
 
 
 // ===============================================
