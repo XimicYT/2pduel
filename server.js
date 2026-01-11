@@ -287,13 +287,11 @@ io.on("connection", (socket) => {
         }
     });
 
+
     // ===============================================
-    //  MOVEMENT & INPUT (SMART FIX APPLIED)
+    //  MOVEMENT & INPUT (FIXED)
     // ===============================================
     function handleInput(socket, data) {
-        // DEBUG: Uncomment to see if raw input is arriving
-        // console.log(`[DEBUG_INPUT] ${socket.id} - ${JSON.stringify(data)}`);
-
         // 1. Try to get Room ID from data, otherwise find it automatically
         let rID = data.roomId || data.roomID;
 
@@ -305,6 +303,12 @@ io.on("connection", (socket) => {
         if (rID && rooms[rID] && rooms[rID].players[socket.id]) {
             const player = rooms[rID].players[socket.id];
 
+            // --- THE FIX: Update Position & Velocity ---
+            if (typeof data.x === 'number') player.x = data.x;
+            if (typeof data.y === 'number') player.y = data.y;
+            if (typeof data.vx === 'number') player.vx = data.vx;
+            if (typeof data.vy === 'number') player.vy = data.vy;
+
             // Update Keys
             if (data.keys) {
                 player.keys = data.keys;
@@ -313,37 +317,12 @@ io.on("connection", (socket) => {
             // Update Aim & State
             if (typeof data.angle !== 'undefined') player.angle = data.angle;
             if (typeof data.shoot !== 'undefined') player.isShooting = data.shoot;
-        } else {
-            console.log(`[DEBUG_FAIL] Input received but no room found for ${socket.id}`);
-        }
+        } 
     }
 
+    // Both events now route to the function that handles EVERYTHING
     socket.on("playerUpdate", (data) => handleInput(socket, data));
     socket.on("input", (data) => handleInput(socket, data));
-    // ===============================================
-    //  MISSING LISTENER: PLAYER MOVE
-    // ===============================================
-    socket.on("playerMove", (data) => {
-        // 1. Find Room
-        let rID = data.roomID || data.roomId;
-
-        // Fallback: search if ID missing
-        if (!rID || !rooms[rID]) {
-            rID = Object.keys(rooms).find(id => rooms[id].players[socket.id]);
-        }
-
-        // 2. Validate
-        if (!rID || !rooms[rID] || !rooms[rID].players[socket.id]) return;
-
-        // 3. Update Position directly from Client
-        const p = rooms[rID].players[socket.id];
-
-        p.x = data.x;
-        p.y = data.y;
-        p.angle = data.angle;
-        p.vx = data.vx; // Important for smoothing on opponent screens
-        p.vy = data.vy;
-    });
 
     // ===============================================
     //  SHOOTING & ABILITIES (UPDATED WITH DEBUG)
