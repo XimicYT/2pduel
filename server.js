@@ -363,63 +363,64 @@ io.on("connection", (socket) => {
             endGame(targetRoomId, "forfeit", winnerId, socket.id);
         }
     });
-
+// ===============================================
+    //  MOVEMENT & INPUT (SMART FIX)
     // ===============================================
-    //  MOVEMENT & INPUT (MERGED AND FIXED)
-    // ===============================================
-    socket.on("playerUpdate", (data) => {
-        const rID = data.roomId || data.roomID;
+    function handleInput(socket, data) {
+        // 1. Try to get Room ID from data, otherwise find it automatically
+        let rID = data.roomId || data.roomID;
+        
+        if (!rID || !rooms[rID]) {
+            // Search all rooms to find which one this player is in
+            rID = Object.keys(rooms).find(id => rooms[id].players[socket.id]);
+        }
 
-        if (rooms[rID] && rooms[rID].players[socket.id]) {
+        if (rID && rooms[rID] && rooms[rID].players[socket.id]) {
             const player = rooms[rID].players[socket.id];
             
-            // --- CRITICAL FIX: Update Keys Here ---
+            // Update Keys
             if (data.keys) {
                 player.keys = data.keys;
             }
 
             // Update Aim & State
-            player.angle = data.angle;
-            player.isShooting = data.shoot;
-
-            // Optional: Server Drift Logging (for debugging)
-            const dist = Math.sqrt(Math.pow(player.x - data.x, 2) + Math.pow(player.y - data.y, 2));
-            if (dist > 150) {
-                // console.log(`[SYNC WARNING] ID: ${socket.id} Drift: ${dist.toFixed(0)}`);
-            }
+            if (typeof data.angle !== 'undefined') player.angle = data.angle;
+            if (typeof data.shoot !== 'undefined') player.isShooting = data.shoot;
         }
-    });
-    // --- COMPATIBILITY FIX: Listen for 'input' too ---
-    socket.on("input", (data) => {
-        // Redirect 'input' to 'playerUpdate' logic  
-        const rID = data.roomId || data.roomID;
-        if (rooms[rID] && rooms[rID].players[socket.id]) {
-            const player = rooms[rID].players[socket.id];
-            if (data.keys) player.keys = data.keys;
-            player.angle = data.angle;
-            player.isShooting = data.shoot;
-        }
-    });
+    }
 
-    // ===============================================
-    //  SHOOTING & ABILITIES
+    socket.on("playerUpdate", (data) => handleInput(socket, data));
+    socket.on("input", (data) => handleInput(socket, data));
+ // ===============================================
+    //  SHOOTING & ABILITIES (UPDATED)
     // ===============================================
     socket.on("playerShoot", (data) => {
-        const rID = data.roomId || data.roomID;
-        const room = rooms[rID];
+        // 1. SMART ROOM FINDING (The Fix)
+        // If the client didn't send a valid ID, search for the player manually
+        let rID = data.roomId || data.roomID;
+        if (!rID || !rooms[rID]) {
+            rID = Object.keys(rooms).find(id => rooms[id].players[socket.id]);
+        }
 
+        const room = rooms[rID];
+        
+        // Safety check: If we still can't find the room or player, stop.
         if (!room || !room.players[socket.id]) return;
 
+        // 2. CHECK GAME START
         if (Date.now() < room.gameStartTime) return;
 
         const p = room.players[socket.id];
         const now = Date.now();
-        const slot = data.slot;
+        const slot = data.slot; // "primary", "secondary", or "utility"
 
+        // 3. CHECK COOLDOWNS
         if (!p.cooldowns) p.cooldowns = {};
         if (p.cooldowns[slot] && p.cooldowns[slot] > now) return;
 
-        // UTILITY LOGIC
+        // ============================
+        // A. UTILITY LOGIC
+        // ============================
         if (slot === "utility") {
             const utilType = p.utility || "dash";
             let cdTime = 0;
@@ -430,23 +431,27 @@ io.on("connection", (socket) => {
                 p.vy = Math.sin(p.angle) * dashPower;
                 p.speedMult = DASH_MULTIPLIER;
 
+                // Send visual buff to client
                 io.to(room.id).emit("applyBuff", {
                     id: socket.id, type: "speed", val: p.speedMult, duration: DASH_DURATION,
                 });
 
+                // Reset speed after duration
                 setTimeout(() => {
-                    if (rooms[rID]?.players[socket.id]) p.speedMult = 1.0;
+                    if (rooms[rID]?.players[socket.id]) rooms[rID].players[socket.id].speedMult = 1.0;
                 }, DASH_DURATION);
 
                 cdTime = COOLDOWNS.dash;
             }
             else if (utilType === "shield") {
                 p.shield = true;
-                cdTime = 0;
+                cdTime = 0; // Cooldown starts AFTER shield breaks/ends
+                
                 setTimeout(() => {
                     if (rooms[rID]?.players[socket.id]?.shield) {
                         rooms[rID].players[socket.id].shield = false;
                         rooms[rID].players[socket.id].cooldowns.utility = Date.now() + COOLDOWNS.shield;
+                        
                         io.to(rID).emit("cooldownUpdate", {
                             id: socket.id, cooldowns: rooms[rID].players[socket.id].cooldowns,
                         });
@@ -476,18 +481,17 @@ io.on("connection", (socket) => {
                     if (dist < 400) {
                         const angle = Math.atan2(dy, dx);
                         const force = 80;
-                        // Force Update on Enemy
                         enemy.vx = Math.cos(angle) * force;
                         enemy.vy = Math.sin(angle) * force;
-                        enemy.repulseEndTime = Date.now() + REPULSE_DURATION;
-
+                        
+                        // Notify enemy they got pushed
                         io.to(pid).emit("forcePush", { angle: angle, force: 30 });
                         hitAnyone = true;
                     }
                 });
-                if (hitAnyone) broadcastRoomState(room);
             }
 
+            // Apply cooldown (Shield handles its own cooldown logic above)
             if (utilType !== "shield") {
                 p.cooldowns.utility = now + cdTime;
             }
@@ -495,35 +499,43 @@ io.on("connection", (socket) => {
             return;
         }
 
-        // WEAPON LOGIC
+        // ============================
+        // B. WEAPON LOGIC
+        // ============================
+        
+        // Shooting breaks invisibility
         if (p.invisible) p.invisible = false;
 
         const weaponKey = slot === "primary" ? p.primary : p.secondary;
         const stats = WEAPONS[weaponKey] || WEAPONS["pulse"];
 
+        // Apply Cooldown (Haste Perk reduces it)
         let actualCD = stats.cooldown;
         if (p.perk === "haste") actualCD *= 0.85;
         p.cooldowns[slot] = now + actualCD;
 
-        // Mine Logic
+        // --- Mine Logic ---
         if (stats.type === "mine") {
             let actualDamage = stats.damage;
             if (p.perk === "lethality") actualDamage *= 1.15;
+            
             room.bullets.push({
                 id: `m_${Date.now()}_${Math.random()}`,
                 ownerId: socket.id,
                 x: p.x, y: p.y, angle: 0, speed: 0,
                 damage: actualDamage, color: stats.color, range: stats.life,
-                traveled: 0, isMine: true, blastRadius: 150
+                traveled: 0, isMine: true, blastRadius: 150, hitList: []
             });
             io.to(room.id).emit("cooldownUpdate", { id: socket.id, cooldowns: p.cooldowns });
             return;
         }
 
-        // Gun Logic
+        // --- Gun Logic ---
         const count = stats.count || 1;
         const spread = stats.spread || 0;
         const spawnDist = PLAYER_RADIUS + 15;
+        
+        // Calculate starting angle based on spread
         let startAngle = data.angle;
         if (count > 1) startAngle = data.angle - spread / 2;
 
@@ -556,9 +568,7 @@ io.on("connection", (socket) => {
         }
 
         io.to(room.id).emit("cooldownUpdate", { id: socket.id, cooldowns: p.cooldowns });
-    });
-
-    // --- RECONNECT / DISCONNECT / LEAVE ---
+    });    // --- RECONNECT / DISCONNECT / LEAVE ---
     socket.on("abandonMatch", () => {
         findRoomAndEnd(socket.id, "draw", null);
     });
