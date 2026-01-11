@@ -78,7 +78,10 @@ let disconnectTimers = {};
 // 5. SOCKET LOGIC
 // ==================================================================
 io.on("connection", (socket) => {
+
     console.log(`[CONNECT] User Connected: ${socket.id}`);
+
+    io.emit("playerCount", io.engine.clientsCount);
 
     // ===============================================
     //  JOIN QUEUE
@@ -513,6 +516,7 @@ io.on("connection", (socket) => {
     //  SMART DISCONNECT
     // ===============================================
     socket.on("disconnect", () => {
+        io.emit("playerCount", io.engine.clientsCount);
         waitingPlayers = waitingPlayers.filter(s => s.id !== socket.id);
 
         let roomId = null;
