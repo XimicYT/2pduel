@@ -167,7 +167,35 @@ function getDistance(a, b) {
 // ==================================================================
 io.on("connection", (socket) => {
   console.log(`User Connected: ${socket.id}`);
+  // --- IN SERVER.JS (inside io.on('connection')) ---
+  
+  // ===============================================
+  //  FIXED INPUT HANDLER
+  // ===============================================
+  socket.on("input", (data) => {
+    // 1. Find the room this player is in
+    let roomId = null;
+    for (const rID in rooms) {
+      if (rooms[rID].players[socket.id]) {
+        roomId = rID;
+        break;
+      }
+    }
 
+    if (!roomId) return; // Player not in a room
+    const room = rooms[roomId];
+    const player = room.players[socket.id];
+
+    if (!player) return;
+
+    // 2. Update the player's internal input state
+    player.keys = data.keys || {}; // { w: true, a: false, ... }
+    player.angle = data.angle;     // Mouse angle
+    player.isShooting = data.shoot;
+    
+    // Note: Abilities (Q, E, Shift) are usually sent as separate events
+    // but WASD is stored here for the game loop.
+  });
   // ===============================================
   //  JOIN QUEUE
   // ===============================================
@@ -683,61 +711,63 @@ function updateRoom(room) {
 
   playerIds.forEach((pid) => {
     const p = room.players[pid];
+    
+    // --- STEP A: CHECK FOR KNOCKBACK / STUN ---
+    const isPinball = p.repulseEndTime && p.repulseEndTime > now;
 
-    // FIX 5: Only apply server physics if there is VELOCITY (knockback/dash)
-    // If vx/vy is 0, we trust the client's direct X/Y updates
-    if (Math.abs(p.vx) > 0.1 || Math.abs(p.vy) > 0.1) {
+    // --- STEP B: APPLY INPUTS (If not stunned) ---
+    const moveSpeed = 5; // ADJUST THIS TO MATCH YOUR CLIENT SPEED
+
+    if (!isPinball) {
+      // Reset velocity to 0, then apply keys
+      // This ensures crisp movement (stops immediately when key released)
+      p.vx = 0; 
+      p.vy = 0;
+
+      if (p.keys) {
+        if (p.keys.w) p.vy = -moveSpeed;
+        if (p.keys.s) p.vy = moveSpeed;
+        if (p.keys.a) p.vx = -moveSpeed;
+        if (p.keys.d) p.vx = moveSpeed;
+
+        // Fix diagonal speed (Pythagoras)
+        if (p.vx !== 0 && p.vy !== 0) {
+          p.vx *= 0.707;
+          p.vy *= 0.707;
+        }
+      }
       
-      const isPinball = p.repulseEndTime && p.repulseEndTime > now;
-
-      // Friction
-      let friction = 0.92; 
-      if (isPinball) friction = 1.0; 
-
-      // Wall Bounce
-      let wallBounce = -0.5; 
-      if (isPinball) wallBounce = -1.0; 
-
-      highVelocityActive = true;
-
-      p.x += p.vx;
-      p.y += p.vy;
-
-      p.vx *= friction;
-      p.vy *= friction;
-
-      if (!isPinball) {
-        if (Math.abs(p.vx) < 0.1) p.vx = 0;
-        if (Math.abs(p.vy) < 0.1) p.vy = 0;
-      }
-
-      // Map Boundaries
-      if (p.x < PLAYER_RADIUS) {
-        p.x = PLAYER_RADIUS;
-        p.vx *= wallBounce;
-      }
-      if (p.x > MAP_WIDTH - PLAYER_RADIUS) {
-        p.x = MAP_WIDTH - PLAYER_RADIUS;
-        p.vx *= wallBounce;
-      }
-      if (p.y < PLAYER_RADIUS) {
-        p.y = PLAYER_RADIUS;
-        p.vy *= wallBounce;
-      }
-      if (p.y > MAP_HEIGHT - PLAYER_RADIUS) {
-        p.y = MAP_HEIGHT - PLAYER_RADIUS;
-        p.vy *= wallBounce;
+      // If using speed buffs (like Dash utility)
+      if (p.speedMult) {
+        p.vx *= p.speedMult;
+        p.vy *= p.speedMult;
       }
     }
+
+    // --- STEP C: APPLY PHYSICS ---
+    // Update Position
+    p.x += p.vx;
+    p.y += p.vy;
+
+    // Apply Friction only if being knocked back (Pinball mode)
+    // Normal movement doesn't need friction because we reset vx/vy every tick above
+    if (isPinball) {
+      highVelocityActive = true; // Tell client to trust server heavily
+      p.vx *= 0.9; // Friction
+      p.vy *= 0.9;
+      
+      // Stop pinball if slow enough
+      if (Math.abs(p.vx) < 0.1 && Math.abs(p.vy) < 0.1) {
+         p.repulseEndTime = 0;
+      }
+    }
+
+    // --- STEP D: MAP BOUNDARIES ---
+    if (p.x < PLAYER_RADIUS) p.x = PLAYER_RADIUS;
+    if (p.x > MAP_WIDTH - PLAYER_RADIUS) p.x = MAP_WIDTH - PLAYER_RADIUS;
+    if (p.y < PLAYER_RADIUS) p.y = PLAYER_RADIUS;
+    if (p.y > MAP_HEIGHT - PLAYER_RADIUS) p.y = MAP_HEIGHT - PLAYER_RADIUS;
   });
-
-  const shouldBroadcast =
-    highVelocityActive || room.tickCount % BROADCAST_RATE === 0;
-
-  if (shouldBroadcast) {
-    broadcastRoomState(room);
-  }
-
   // 2. BULLET LOGIC
   if (!room.bullets || room.bullets.length === 0) return;
 
