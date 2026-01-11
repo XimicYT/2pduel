@@ -635,16 +635,23 @@ function broadcastRoomState(room) {
   const p1Force = Math.abs(p1.vx) > 0.1 || Math.abs(p1.vy) > 0.1;
   const p2Force = Math.abs(p2.vx) > 0.1 || Math.abs(p2.vy) > 0.1;
 
+  // --- FIX: Always send p1.x and p1.y, never send null ---
+// Send P1 update to P1 (Always send X and Y)
   io.to(playerIds[0]).emit("selfUpdate", {
-    x: p1Force ? p1.x : null, 
-    y: p1Force ? p1.y : null, 
-    vx: p1.vx, vy: p1.vy, hp: p1.hp,
+    x: p1.x,
+    y: p1.y,
+    vx: p1.vx,
+    vy: p1.vy,
+    hp: p1.hp,
   });
-  
+
+  // Send P2 update to P2 (Always send X and Y)
   io.to(playerIds[1]).emit("selfUpdate", {
-    x: p2Force ? p2.x : null, 
-    y: p2Force ? p2.y : null, 
-    vx: p2.vx, vy: p2.vy, hp: p2.hp,
+    x: p2.x,
+    y: p2.y,
+    vx: p2.vx,
+    vy: p2.vy,
+    hp: p2.hp,
   });
 }
 
