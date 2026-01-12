@@ -399,18 +399,29 @@ io.on("connection", (socket) => {
                 cdTime = COOLDOWNS.dash;
             }
             else if (utilType === "shield") {
-                p.shield = true;
-                cdTime = 0;
+                // If they already have a shield, do nothing
+                if (p.shield) return;
 
-                setTimeout(() => {
+                p.shield = true;
+                
+                // We do NOT set the cooldown yet. 
+                // Cooldown starts when the shield breaks or expires naturally.
+
+                // Set the natural expiration timer (10 seconds)
+                p.shieldTimer = setTimeout(() => {
                     if (rooms[rID]?.players[pID]?.shield) {
+                        // 1. Remove Shield
                         rooms[rID].players[pID].shield = false;
+                        rooms[rID].players[pID].shieldTimer = null;
+
+                        // 2. Start Cooldown
                         rooms[rID].players[pID].cooldowns.utility = Date.now() + COOLDOWNS.shield;
 
+                        // 3. Notify Clients
                         io.to(rID).emit("cooldownUpdate", {
-                            id: pID, cooldowns: rooms[rID].players[pID].cooldowns,
+                            id: pID, 
+                            cooldowns: rooms[rID].players[pID].cooldowns,
                         });
-                        io.to(rID).emit("opponentUpdate", { id: pID, shield: false });
                     }
                 }, SHIELD_DURATION);
             }
@@ -641,8 +652,28 @@ setInterval(() => {
                         if (dist < PLAYER_RADIUS + 10) {
 
                             // Check Shield
+                            // Check Shield
                             if (p.shield) {
+                                // 1. Visual Indicator (Shield Hit)
                                 io.to(rID).emit("damageIndicator", { x: p.x, y: p.y, damage: 0, type: "shield" });
+                                
+                                // 2. BREAK THE SHIELD
+                                p.shield = false;
+
+                                // 3. CANCEL THE 10s TIMER (So it doesn't try to expire later)
+                                if (p.shieldTimer) {
+                                    clearTimeout(p.shieldTimer);
+                                    p.shieldTimer = null;
+                                }
+
+                                // 4. START COOLDOWN NOW (Since shield is gone)
+                                if (!p.cooldowns) p.cooldowns = {};
+                                p.cooldowns.utility = Date.now() + COOLDOWNS.shield;
+
+                                // 5. SYNC COOLDOWN TO CLIENT
+                                io.to(rID).emit("cooldownUpdate", { id: pID, cooldowns: p.cooldowns });
+
+                                // 6. Destroy the bullet (it was absorbed)
                                 removeBullet = true;
                                 break;
                             }
