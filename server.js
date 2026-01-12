@@ -625,63 +625,92 @@ setInterval(() => {
         }
 
         // 3. UPDATE BULLETS
-        let roomDead = false; // Flag to stop processing if room gets deleted
+        let roomDead = false; // FLAG: Stops the loop if the game ends
 
         for (let i = room.bullets.length - 1; i >= 0; i--) {
             const b = room.bullets[i];
 
+            // Move Bullet
             b.x += Math.cos(b.angle) * b.speed;
             b.y += Math.sin(b.angle) * b.speed;
             b.traveled += b.speed;
 
             let removeBullet = false;
 
-            // ... (Your Map Bounds Check here) ...
+            // --- A. CHECK MAP BOUNDS ---
             if (b.x < -50 || b.x > MAP_WIDTH + 50 || b.y < -50 || b.y > MAP_HEIGHT + 50) {
                 removeBullet = true;
             }
 
-            // ... (Your Range Check here) ...
+            // --- B. CHECK MAX RANGE (Airburst for Void Cannon) ---
             if (!removeBullet && b.traveled >= b.range && !b.isMine) {
                 if (b.explosive) {
-                    // FIX: Capture the return value
+                    // Explode at max range
                     const gameOver = handleExplosion(room, b, b.x, b.y);
-                    if (gameOver) {
-                        roomDead = true;
-                        break; // Stop checking bullets, the room is gone!
-                    }
+                    if (gameOver) roomDead = true; // Stop if game ended
                 }
                 removeBullet = true;
             }
 
             // --- C. PLAYER COLLISION ---
-            if (!removeBullet && !roomDead) { // Check !roomDead
+            if (!removeBullet && !roomDead) {
                 for (const pID in room.players) {
                     const p = room.players[pID];
 
+                    // Check Persistent ID against Bullet Owner ID
                     if (p.id !== b.ownerId && p.connected && p.hp > 0 && !b.hitList.includes(p.id)) {
                         const dist = Math.sqrt((p.x - b.x) ** 2 + (p.y - b.y) ** 2);
 
                         if (dist < PLAYER_RADIUS + 10) {
                             
-                            // 1. EXPLOSIVE LOGIC
+                            // 1. EXPLOSIVE LOGIC (Void Cannon)
                             if (b.explosive) {
-                                // FIX: Capture return value here too
                                 const gameOver = handleExplosion(room, b, b.x, b.y);
                                 removeBullet = true;
                                 if (gameOver) {
-                                    roomDead = true; 
+                                    roomDead = true;
                                 }
-                                break; 
+                                break; // Bullet exploded, stop checking players
                             }
 
-                            // ... (Your existing Normal Gun Logic) ...
-                            // NOTE: If normal guns cause a kill, ensure endGame is called, 
-                            // but usually normal guns don't hit multiple targets so the zombie issue is rarer.
-                            // ...
-                            
-                            // (Keep your existing Normal Gun code here)
-                            // ...
+                            // 2. STANDARD LOGIC (Normal Guns - Restored!)
+                            else {
+                                // Check Shield
+                                if (p.shield) {
+                                    p.shield = false;
+                                    p.cooldowns.utility = Date.now() + COOLDOWNS.shield;
+                                    
+                                    // Visuals
+                                    io.to(rID).emit("visualEffect", { type: "shieldBreak", x: p.x, y: p.y });
+                                    io.to(rID).emit("damageIndicator", { x: p.x, y: p.y, damage: 0, type: "shield" });
+                                    io.to(rID).emit("cooldownUpdate", { id: p.id, cooldowns: p.cooldowns });
+                                    io.to(rID).emit("opponentUpdate", { id: p.id, shield: false });
+                                    
+                                    removeBullet = true;
+                                    break;
+                                }
+
+                                // Apply Damage
+                                p.hp -= b.damage;
+                                
+                                // Visuals
+                                io.to(rID).emit("visualEffect", { type: "hit", x: b.x, y: b.y }); // Added Hit Flash
+                                io.to(rID).emit("playerDamage", { id: p.id, hp: p.hp, damage: b.damage });
+                                io.to(rID).emit("damageIndicator", { x: p.x, y: p.y, damage: b.damage, type: "normal" });
+                                b.hitList.push(p.id);
+
+                                // Check Kill
+                                if (p.hp <= 0) {
+                                    endGame(rID, "kill", b.ownerId, p.id);
+                                    roomDead = true; // Stop loop, room is gone
+                                    break;
+                                }
+
+                                if (!b.pierce) {
+                                    removeBullet = true;
+                                    break;
+                                }
+                            }
                         }
                     }
                 }
@@ -690,11 +719,11 @@ setInterval(() => {
             if (removeBullet) {
                 room.bullets.splice(i, 1);
             }
-            if (roomDead) break; // Break outer bullet loop
+            if (roomDead) break; // Break outer bullet loop immediately
         }
 
-        // --- THE ZOMBIE FIX ---
-        // Only send the update if the room actually still exists in memory!
+        // --- D. FINAL UPDATE ---
+        // FIX: Only send update if the room still exists!
         if (rooms[rID]) {
             io.to(rID).emit("gameUpdate", {
                 players: room.players,
