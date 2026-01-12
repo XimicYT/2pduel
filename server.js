@@ -4,7 +4,7 @@ const { Server } = require("socket.io");
 const cors = require("cors");
 
 // ==================================================================
-// 1. SETUP SERVER 
+// 1. SETUP SERVER
 // ==================================================================
 const app = express();
 app.use(cors());
@@ -263,7 +263,7 @@ io.on("connection", (socket) => {
             });
 
             // Tell opponent the original ID has returned
-            io.to(foundRoomId).emit("opponentStatus", { status: "reconnected", id: oldSocketId });
+            sock.to(foundRoomId).emit("matchResumed", { reconnectedId: oldSocketId });
             
             console.log(`[REJOIN] Success. Mapped ${sock.id} to ${oldSocketId}`);
         } else {
@@ -563,7 +563,7 @@ io.on("connection", (socket) => {
             delete rooms[roomId];
         } else {
             console.log(`[ROOM] Room ${roomId} waiting for reconnect.`);
-            io.to(roomId).emit("opponentStatus", { status: "disconnected", id: pID });
+            socket.to(roomId).emit("opponentDisconnected", { id: pID });
 
             disconnectTimers[pID] = setTimeout(() => {
                 if (rooms[roomId] && rooms[roomId].players[pID]) {
