@@ -49,7 +49,20 @@ const WEAPONS = {
     pulse: { type: "gun", damage: 12, speed: 22, cooldown: 140, range: 1100, color: "#00f3ff", desc: "Standard Rifle" },
     rail: { type: "gun", damage: 40, speed: 60, cooldown: 1500, range: 3000, color: "#ff0055", pierce: true, desc: "Piercing Sniper" },
     scatter: { type: "gun", damage: 7, speed: 22, cooldown: 850, range: 550, color: "#ffff00", count: 6, spread: 0.4, desc: "Shotgun" },
-    void: { type: "gun", damage: 20, speed: 14, cooldown: 1800, range: 1100, color: "#9900ff", size: 14, explosive: true, blastRadius: 180, blastDamage: 40, desc: "Explosive Launcher" },
+    void: { 
+        type: "gun", 
+        damage: 15,          // Direct impact damage (low)
+        speed: 16,           // Slower projectile
+        cooldown: 1800, 
+        range: 1000, 
+        color: "#9900ff", 
+        size: 16, 
+        pierce: false,       // STOP on impact
+        explosive: true,     // Custom flag for our logic
+        blastRadius: 220,    // Size of explosion
+        blastDamage: 70,     // Max damage at center
+        desc: "Proximity Launcher" 
+    },
     twin: { type: "gun", damage: 8, speed: 26, cooldown: 60, range: 750, color: "#00ffaa", desc: "Rapid SMG" },
 
     // --- SECONDARY ---
@@ -742,5 +755,56 @@ function endGame(roomId, reason, winnerId, loserId) {
         delete rooms[roomId];
     }
 }
+function handleExplosion(room, bullet, x, y) {
+    // 1. Send Visual Effect to Client
+    io.to(room.id).emit("visualEffect", { 
+        type: "explosion", 
+        x: x, 
+        y: y, 
+        radius: bullet.blastRadius, 
+        color: bullet.color 
+    });
 
+    // 2. Check every player in the room for damage
+    for (const pID in room.players) {
+        const p = room.players[pID];
+        if (!p.connected || p.hp <= 0) continue;
+
+        // Calculate Distance
+        const dx = p.x - x;
+        const dy = p.y - y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+
+        // 3. Apply Damage if inside radius
+        if (dist <= bullet.blastRadius) {
+            // Calculate Falloff: 1.0 at center, 0.0 at edge
+            const falloff = 1 - (dist / bullet.blastRadius);
+            const damage = Math.floor(bullet.blastDamage * falloff);
+
+            if (damage > 0) {
+                // Shield Logic
+                if (p.shield) {
+                    p.shield = false;
+                    p.cooldowns.utility = Date.now() + COOLDOWNS.shield;
+                    io.to(room.id).emit("damageIndicator", { x: p.x, y: p.y, damage: 0, type: "shield" });
+                    io.to(room.id).emit("cooldownUpdate", { id: p.id, cooldowns: p.cooldowns });
+                    io.to(room.id).emit("opponentUpdate", { id: p.id, shield: false });
+                    continue; // Shield absorbs the blast completely
+                }
+
+                // Apply HP Reduction
+                p.hp -= damage;
+
+                // Notify Room
+                io.to(room.id).emit("playerDamage", { id: p.id, hp: p.hp, damage: damage });
+                io.to(room.id).emit("damageIndicator", { x: p.x, y: p.y, damage: damage, type: "blast" });
+
+                // Kill Check
+                if (p.hp <= 0) {
+                    endGame(room.id, "kill", bullet.ownerId, p.id);
+                }
+            }
+        }
+    }
+}
 server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
