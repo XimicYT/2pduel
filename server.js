@@ -639,6 +639,13 @@ setInterval(() => {
 
             // --- A. CHECK MAP BOUNDS ---
             if (b.x < -50 || b.x > MAP_WIDTH + 50 || b.y < -50 || b.y > MAP_HEIGHT + 50) {
+                
+                // NEW: If it's a Void Bullet, explode against the wall!
+                if (b.explosive) {
+                    const gameOver = handleExplosion(room, b, b.x, b.y);
+                    if (gameOver) roomDead = true; 
+                }
+
                 removeBullet = true;
             }
 
