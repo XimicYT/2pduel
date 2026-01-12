@@ -634,62 +634,60 @@ setInterval(() => {
 
             let removeBullet = false;
 
-            if (b.traveled >= b.range && !b.isMine) {
-                removeBullet = true;
-            }
-
+            // --- A. CHECK MAP BOUNDS ---
             if (b.x < -50 || b.x > MAP_WIDTH + 50 || b.y < -50 || b.y > MAP_HEIGHT + 50) {
                 removeBullet = true;
             }
 
-            // Collision Check
+            // --- B. CHECK MAX RANGE (Airburst) ---
+            if (!removeBullet && b.traveled >= b.range && !b.isMine) {
+                // NEW: Detonate if it's an explosive weapon reaching max range
+                if (b.explosive) {
+                    handleExplosion(room, b, b.x, b.y);
+                }
+                removeBullet = true;
+            }
+
+            // --- C. PLAYER COLLISION ---
             if (!removeBullet) {
                 for (const pID in room.players) {
                     const p = room.players[pID];
 
                     // Check Persistent ID against Bullet Owner ID
-                    if (p.id !== b.ownerId && p.connected && !b.hitList.includes(p.id)) {
+                    if (p.id !== b.ownerId && p.connected && p.hp > 0 && !b.hitList.includes(p.id)) {
                         const dist = Math.sqrt((p.x - b.x) ** 2 + (p.y - b.y) ** 2);
 
                         if (dist < PLAYER_RADIUS + 10) {
+                            
+                            // 1. EXPLOSIVE LOGIC (Void Cannon)
+                            if (b.explosive) {
+                                handleExplosion(room, b, b.x, b.y);
+                                removeBullet = true;
+                                break; // Stop checking other players, it exploded
+                            }
 
+                            // 2. STANDARD LOGIC (Normal Guns)
                             
                             // Check Shield
                             if (p.shield) {
-                                // 1. Break the shield
                                 p.shield = false;
-
-                                // 2. Trigger the cooldown immediately (since it broke early)
-                                // We add the cooldown time to 'now'
                                 p.cooldowns.utility = Date.now() + COOLDOWNS.shield;
-
-                                // 3. Send visual feedback (Blue "0" damage pop-up)
                                 io.to(rID).emit("damageIndicator", { x: p.x, y: p.y, damage: 0, type: "shield" });
-                                
-                                // 4. Update the client's HUD to show the red cooldown timer
                                 io.to(rID).emit("cooldownUpdate", { id: p.id, cooldowns: p.cooldowns });
-
-                                // 5. Absorb the bullet (remove it)
+                                io.to(rID).emit("opponentUpdate", { id: p.id, shield: false });
                                 removeBullet = true;
                                 break;
                             }
 
                             // Apply Damage
                             p.hp -= b.damage;
-
-                            io.to(rID).emit("playerDamage", {
-                                id: p.id,
-                                hp: p.hp,
-                                damage: b.damage
-                            });
-
+                            
+                            io.to(rID).emit("playerDamage", { id: p.id, hp: p.hp, damage: b.damage });
                             io.to(rID).emit("damageIndicator", { x: p.x, y: p.y, damage: b.damage, type: "normal" });
-
                             b.hitList.push(p.id);
 
                             if (p.hp <= 0) {
-                                const killerId = b.ownerId;
-                                endGame(rID, "kill", killerId, p.id);
+                                endGame(rID, "kill", b.ownerId, p.id);
                                 return;
                             }
 
@@ -706,7 +704,6 @@ setInterval(() => {
                 room.bullets.splice(i, 1);
             }
         }
-
         io.to(rID).emit("gameUpdate", {
             players: room.players,
             bullets: room.bullets
