@@ -640,9 +640,23 @@ setInterval(() => {
 
                         if (dist < PLAYER_RADIUS + 10) {
 
+                            
                             // Check Shield
                             if (p.shield) {
+                                // 1. Break the shield
+                                p.shield = false;
+
+                                // 2. Trigger the cooldown immediately (since it broke early)
+                                // We add the cooldown time to 'now'
+                                p.cooldowns.utility = Date.now() + COOLDOWNS.shield;
+
+                                // 3. Send visual feedback (Blue "0" damage pop-up)
                                 io.to(rID).emit("damageIndicator", { x: p.x, y: p.y, damage: 0, type: "shield" });
+                                
+                                // 4. Update the client's HUD to show the red cooldown timer
+                                io.to(rID).emit("cooldownUpdate", { id: p.id, cooldowns: p.cooldowns });
+
+                                // 5. Absorb the bullet (remove it)
                                 removeBullet = true;
                                 break;
                             }
