@@ -263,7 +263,7 @@ io.on("connection", (socket) => {
             });
 
             // Tell opponent the original ID has returned
-            sock.to(foundRoomId).emit("matchResumed", { reconnectedId: oldSocketId });
+            io.to(foundRoomId).emit("matchResumed", { reconnectedId: oldSocketId });
             
             console.log(`[REJOIN] Success. Mapped ${sock.id} to ${oldSocketId}`);
         } else {
