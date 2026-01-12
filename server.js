@@ -4,7 +4,7 @@ const { Server } = require("socket.io");
 const cors = require("cors");
 
 // ==================================================================
-// 1. SETUP SERVER a
+// 1. SETUP SERVER 
 // ==================================================================
 const app = express();
 app.use(cors());
