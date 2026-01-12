@@ -23,7 +23,7 @@ const PORT = process.env.PORT || 3000;
 const TICK_RATE = 1000 / 60;
 const MAP_WIDTH = 1920;
 const MAP_HEIGHT = 1080;
-const PLAYER_RADIUS = 90;
+const PLAYER_RADIUS = 900;
 const COUNTDOWN_TIME = 3000;
 
 // --- ABILITY CONSTANTS ---
