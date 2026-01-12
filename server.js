@@ -625,6 +625,8 @@ setInterval(() => {
         }
 
         // 3. UPDATE BULLETS
+        let roomDead = false; // Flag to stop processing if room gets deleted
+
         for (let i = room.bullets.length - 1; i >= 0; i--) {
             const b = room.bullets[i];
 
@@ -634,67 +636,52 @@ setInterval(() => {
 
             let removeBullet = false;
 
-            // --- A. CHECK MAP BOUNDS ---
+            // ... (Your Map Bounds Check here) ...
             if (b.x < -50 || b.x > MAP_WIDTH + 50 || b.y < -50 || b.y > MAP_HEIGHT + 50) {
                 removeBullet = true;
             }
 
-            // --- B. CHECK MAX RANGE (Airburst) ---
+            // ... (Your Range Check here) ...
             if (!removeBullet && b.traveled >= b.range && !b.isMine) {
-                // NEW: Detonate if it's an explosive weapon reaching max range
                 if (b.explosive) {
-                    handleExplosion(room, b, b.x, b.y);
+                    // FIX: Capture the return value
+                    const gameOver = handleExplosion(room, b, b.x, b.y);
+                    if (gameOver) {
+                        roomDead = true;
+                        break; // Stop checking bullets, the room is gone!
+                    }
                 }
                 removeBullet = true;
             }
 
             // --- C. PLAYER COLLISION ---
-            if (!removeBullet) {
+            if (!removeBullet && !roomDead) { // Check !roomDead
                 for (const pID in room.players) {
                     const p = room.players[pID];
 
-                    // Check Persistent ID against Bullet Owner ID
                     if (p.id !== b.ownerId && p.connected && p.hp > 0 && !b.hitList.includes(p.id)) {
                         const dist = Math.sqrt((p.x - b.x) ** 2 + (p.y - b.y) ** 2);
 
                         if (dist < PLAYER_RADIUS + 10) {
                             
-                            // 1. EXPLOSIVE LOGIC (Void Cannon)
+                            // 1. EXPLOSIVE LOGIC
                             if (b.explosive) {
-                                handleExplosion(room, b, b.x, b.y);
+                                // FIX: Capture return value here too
+                                const gameOver = handleExplosion(room, b, b.x, b.y);
                                 removeBullet = true;
-                                break; // Stop checking other players, it exploded
+                                if (gameOver) {
+                                    roomDead = true; 
+                                }
+                                break; 
                             }
 
-                            // 2. STANDARD LOGIC (Normal Guns)
+                            // ... (Your existing Normal Gun Logic) ...
+                            // NOTE: If normal guns cause a kill, ensure endGame is called, 
+                            // but usually normal guns don't hit multiple targets so the zombie issue is rarer.
+                            // ...
                             
-                            // Check Shield
-                            if (p.shield) {
-                                p.shield = false;
-                                p.cooldowns.utility = Date.now() + COOLDOWNS.shield;
-                                io.to(rID).emit("damageIndicator", { x: p.x, y: p.y, damage: 0, type: "shield" });
-                                io.to(rID).emit("cooldownUpdate", { id: p.id, cooldowns: p.cooldowns });
-                                io.to(rID).emit("opponentUpdate", { id: p.id, shield: false });
-                                removeBullet = true;
-                                break;
-                            }
-
-                            // Apply Damage
-                            p.hp -= b.damage;
-                            
-                            io.to(rID).emit("playerDamage", { id: p.id, hp: p.hp, damage: b.damage });
-                            io.to(rID).emit("damageIndicator", { x: p.x, y: p.y, damage: b.damage, type: "normal" });
-                            b.hitList.push(p.id);
-
-                            if (p.hp <= 0) {
-                                endGame(rID, "kill", b.ownerId, p.id);
-                                return;
-                            }
-
-                            if (!b.pierce) {
-                                removeBullet = true;
-                                break;
-                            }
+                            // (Keep your existing Normal Gun code here)
+                            // ...
                         }
                     }
                 }
@@ -703,11 +690,17 @@ setInterval(() => {
             if (removeBullet) {
                 room.bullets.splice(i, 1);
             }
+            if (roomDead) break; // Break outer bullet loop
         }
-        io.to(rID).emit("gameUpdate", {
-            players: room.players,
-            bullets: room.bullets
-        });
+
+        // --- THE ZOMBIE FIX ---
+        // Only send the update if the room actually still exists in memory!
+        if (rooms[rID]) {
+            io.to(rID).emit("gameUpdate", {
+                players: room.players,
+                bullets: room.bullets
+            });
+        }
     }
 }, TICK_RATE);
 
@@ -762,7 +755,9 @@ function handleExplosion(room, bullet, x, y) {
         color: bullet.color 
     });
 
-    // 2. Check every player in the room for damage
+    let gameEnded = false; // Track if the game ends in this function
+
+    // 2. Check every player in the room
     for (const pID in room.players) {
         const p = room.players[pID];
         if (!p.connected || p.hp <= 0) continue;
@@ -772,9 +767,17 @@ function handleExplosion(room, bullet, x, y) {
         const dy = p.y - y;
         const dist = Math.sqrt(dx * dx + dy * dy);
 
-        // 3. Apply Damage if inside radius
+        // 3. Apply Damage & Physics if inside radius
         if (dist <= bullet.blastRadius) {
-            // Calculate Falloff: 1.0 at center, 0.0 at edge
+            
+            // --- FIX FOR BLINK (Rubberbanding) ---
+            // We must apply force on the server too, or the client will snap back
+            const angle = Math.atan2(dy, dx);
+            const force = 15; // Match this with your client-side force
+            p.vx += Math.cos(angle) * force;
+            p.vy += Math.sin(angle) * force;
+
+            // Calculate Falloff
             const falloff = 1 - (dist / bullet.blastRadius);
             const damage = Math.floor(bullet.blastDamage * falloff);
 
@@ -786,7 +789,7 @@ function handleExplosion(room, bullet, x, y) {
                     io.to(room.id).emit("damageIndicator", { x: p.x, y: p.y, damage: 0, type: "shield" });
                     io.to(room.id).emit("cooldownUpdate", { id: p.id, cooldowns: p.cooldowns });
                     io.to(room.id).emit("opponentUpdate", { id: p.id, shield: false });
-                    continue; // Shield absorbs the blast completely
+                    continue; 
                 }
 
                 // Apply HP Reduction
@@ -799,9 +802,11 @@ function handleExplosion(room, bullet, x, y) {
                 // Kill Check
                 if (p.hp <= 0) {
                     endGame(room.id, "kill", bullet.ownerId, p.id);
+                    gameEnded = true; // Mark that the game has ended
                 }
             }
         }
     }
+    return gameEnded; // Return the status
 }
 server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
